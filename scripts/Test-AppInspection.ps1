@@ -6,6 +6,9 @@ if (!(Test-Path -LiteralPath $client)) { throw 'Inspection client is missing.' }
 $modelSettings=Join-Path $package 'data/device-models.json'
 $hadModelSettings=Test-Path -LiteralPath $modelSettings
 $savedModelSettings=if($hadModelSettings){[System.IO.File]::ReadAllBytes($modelSettings)}else{$null}
+$calibrationSettings=Join-Path $package 'data/calibration-settings.json'
+$hadCalibrationSettings=Test-Path -LiteralPath $calibrationSettings
+$savedCalibrationSettings=if($hadCalibrationSettings){[System.IO.File]::ReadAllBytes($calibrationSettings)}else{$null}
 $testApp=Start-Process -FilePath (Join-Path $package 'vdxr-calibration.exe') -ArgumentList '--preview','--seconds','45' -WorkingDirectory $package -WindowStyle Hidden -PassThru
 function Invoke-App([string]$Json) { (& $client -ProcessId $testApp.Id -Request $Json | ConvertFrom-Json) }
 try {
@@ -15,6 +18,19 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if($state.mode -ne 'synthetic_preview'){throw 'Preview did not initialize.'}
+    if(!(Invoke-App '{"op":"set_fast_mode","value":0}').ok){throw 'Slow capture selection failed.'}
+    $slow=Invoke-App '{"op":"state"}'
+    if($slow.fast_mode -or $slow.capture_target_samples -ne 250){throw 'Slow sample target did not change.'}
+    $null=Invoke-App '{"op":"exit"}'
+    if(!$testApp.WaitForExit(5000)){throw 'Preview did not exit before persistence check.'}
+    $testApp=Start-Process -FilePath (Join-Path $package 'vdxr-calibration.exe') -ArgumentList '--preview','--seconds','45' -WorkingDirectory $package -WindowStyle Hidden -PassThru
+    $slow=$null
+    for($attempt=0;$attempt -lt 30;$attempt++){try{$slow=Invoke-App '{"op":"state"}';if($slow.mode -eq 'synthetic_preview'){break}}catch{};Start-Sleep -Milliseconds 100}
+    if($slow.mode -ne 'synthetic_preview' -or $slow.fast_mode -or $slow.capture_target_samples -ne 250){throw 'Capture speed did not persist across restart.'}
+    if(!(Invoke-App '{"op":"set_fast_mode","value":1}').ok){throw 'Fast capture selection failed.'}
+    $fast=Invoke-App '{"op":"state"}'
+    if(!$fast.fast_mode -or $fast.capture_target_samples -ne 100){throw 'Fast sample target did not change.'}
+    if((Invoke-App '{"op":"set_fast_mode","value":2}').ok){throw 'Invalid fast mode value accepted.'}
     if(!(Invoke-App '{"op":"select_reference","value":1}').ok){throw 'Selection command failed.'}
     if((Invoke-App '{"op":"state"}').reference -ne 'right'){throw 'Selection was not reflected in state.'}
     if((Invoke-App '{"op":"select_reference","value":7}').ok){throw 'Invalid selection was accepted.'}
@@ -51,4 +67,5 @@ try {
 } finally {
     if(!$testApp.HasExited){Stop-Process -Id $testApp.Id}
     if($hadModelSettings){[System.IO.File]::WriteAllBytes($modelSettings,$savedModelSettings)}elseif(Test-Path -LiteralPath $modelSettings){Remove-Item -LiteralPath $modelSettings}
+    if($hadCalibrationSettings){[System.IO.File]::WriteAllBytes($calibrationSettings,$savedCalibrationSettings)}elseif(Test-Path -LiteralPath $calibrationSettings){Remove-Item -LiteralPath $calibrationSettings}
 }

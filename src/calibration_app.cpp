@@ -22,7 +22,7 @@ using namespace calibration;
 using namespace scene;
 namespace fs=std::filesystem;
 using Clock=std::chrono::steady_clock;
-static constexpr size_t CaptureSamples=100,ValidationSamples=50;
+static constexpr size_t FastCaptureSamples=100,SlowCaptureSamples=250,ValidationSamples=50;
 static constexpr double SampleInterval=.05;
 static bool exitRequested=false,mouseDown=false;
 static ULONGLONG mouseActiveUntil=0;
@@ -74,6 +74,8 @@ struct Model {
     device_models::Identity controllerIdentity[2];
     std::string controllerOverride[2]{"auto","auto"},systemName,interactionProfiles[2];
     bool modelSettings=false;
+    bool fastMode=true;
+    size_t captureTarget()const{return fastMode ? FastCaptureSamples:SlowCaptureSamples;}
     Clock::time_point inspectionStarted=Clock::now();
     std::string controllerKey(int side)const{return controllerIdentity[side].model+(side ? "-right":"-left");}
     void updateIdentities(){for(int side=0;side<2;++side)controllerIdentity[side]=device_models::controller(systemName,interactionProfiles[side],controllerOverride[side]);}
@@ -87,6 +89,7 @@ struct Model {
         if(action=="exit")return true;
         if(action=="place_panel")return !service;
         if(action=="show_device_models")return true;
+        if(action=="set_fast_mode")return !busy();
         if(action=="select_left_model"||action=="select_right_model")return !busy();
         if(action=="select_reference"||action=="select_tracker"||action=="select_role"||action=="reset")return !busy();
         if(action=="start_capture")return !preview&&!busy()&&mapLocked&&grips[reference].tracked()&&devices.count(selected)&&devices.at(selected).fresh();
@@ -104,6 +107,7 @@ struct Model {
         if(!can(action))return false;
         if(action=="select_reference"){if(index<0||index>1)return false;reference=index;reset();}
         else if(action=="show_device_models"){if(index<0||index>1)return false;modelSettings=index!=0;}
+        else if(action=="set_fast_mode"){if(index<0||index>1)return false;atomicWrite(L"data/calibration-settings.json",index ? "{\"fast_mode\":true}":"{\"fast_mode\":false}");fastMode=index!=0;}
         else if(action=="select_left_model"||action=="select_right_model"){
             if(!device_models::controllerChoice(text))return false;controllerOverride[action=="select_right_model" ? 1:0]=text;updateIdentities();
             std::ostringstream json;json<<"{\"left\":\""<<controllerOverride[0]<<"\",\"right\":\""<<controllerOverride[1]<<"\"}";atomicWrite(L"data/device-models.json",json.str());
@@ -176,7 +180,7 @@ struct Model {
     void tick(XrApp* xr,XrTime time) {
         pollHardware();const auto now=Clock::now();const double delta=std::min(.05,std::chrono::duration<double>(now-lastTick).count());lastTick=now;
         if(pendingFit.valid()&&pendingFit.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
-            try { result=pendingFit.get();hasFit=true;step=Step::Validate;message="Fit passed its reserved samples. Now run a separate validation movement."; }
+            try { result=pendingFit.get();hasFit=true;step=Step::Ready;message="Calibrated. The tracker is now displayed in Quest space.";try{save();message="Calibrated and saved. The tracker is now displayed in Quest space.";}catch(const std::exception& error){message=std::string("Alignment applied, but saving failed: ")+error.what();} }
             catch(const std::exception& error){hasFit=false;step=Step::Error;message=error.what();}
         }
         auto* r=raw();bool valid=r&&r->fresh()&&grips[reference].tracked()&&(!xr||xr->focused);
@@ -201,7 +205,7 @@ struct Model {
         }
         if(step==Step::Capture) {
             message=valid ? "Recording. Keep the pair rigid; use several rotation axes.":"Recording paused: waiting for both devices to be tracked.";
-            if(samples.size()>=CaptureSamples)fitCapture();
+            if(samples.size()>=captureTarget())fitCapture();
         }
         const bool motionCovered=(validationMax-validationMin).norm()>=.25&&validationRotation>=.6;
         if(validationRunning&&validation.count>=ValidationSamples&&!motionCovered)message="Validation needs broader movement: cover 25 cm and rotate around different directions.";
@@ -215,7 +219,7 @@ struct Model {
     void save() {
         if(preview||step!=Step::Ready)return;
         atomicWrite(L"data/stage.txt",poseText(result.world));atomicWrite(L"data/mount.txt",poseText(result.mount));
-        std::ostringstream json;json<<"{\n  \"kind\": \"regular\",\n  \"serial\": \""<<selected<<"\",\n  \"role\": \""<<external_trackers::Roles[role]<<"\",\n  \"validation_samples\": "<<validation.count<<",\n  \"position_rms_m\": "<<validation.positionRms()<<",\n  \"angle_rms_degrees\": "<<validation.angleRms()<<"\n}\n";
+        std::ostringstream json;json<<"{\n  \"kind\": \"regular\",\n  \"serial\": \""<<selected<<"\",\n  \"role\": \""<<external_trackers::Roles[role]<<"\",\n  \"fit_holdout_samples\": "<<result.reserved.count<<",\n  \"fit_holdout_position_rms_m\": "<<result.reserved.positionRms()<<",\n  \"fit_holdout_angle_rms_degrees\": "<<result.reserved.angleRms()<<",\n  \"validation_samples\": "<<validation.count<<",\n  \"position_rms_m\": "<<validation.positionRms()<<",\n  \"angle_rms_degrees\": "<<validation.angleRms()<<"\n}\n";
         atomicWrite(L"data/profile.json",json.str());step=Step::Saved;message="Profile saved locally. Recalibrate after recentering or moving base stations.";
     }
     void load() {
@@ -253,7 +257,7 @@ static void drawUi(Model& m,XrApp* xr) {
     ImGui::Begin("VDXR Tracker Calibration",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings);
     ImGui::TextUnformatted("VDXR TRACKER CALIBRATION");ImGui::SameLine(490);if(ImGui::SmallButton("Exit"))action("exit");
     if(m.preview)ImGui::TextColored({.7f,.25f,.05f,1},"DESIGN PREVIEW - simulated devices");
-    ImGui::TextWrapped("Regular calibration: Devices > Capture > Validate > Save");ImGui::Separator();
+    ImGui::TextWrapped("Regular calibration: Devices > Capture > Aligned and saved");ImGui::Separator();
     ImGui::Text("Quest: %s",m.service?"VR session closed; tracker service active":m.head.tracked()?"Tracked":"Waiting");
     ImGui::SameLine(390);ImGui::BeginDisabled(m.service);if(ImGui::SmallButton("Bring panel here"))action("place_panel");ImGui::EndDisabled();
     ImGui::Text("Left controller: %s   Right: %s",m.grips[0].tracked()?"Tracked":"Not tracked",m.grips[1].tracked()?"Tracked":"Not tracked");
@@ -267,6 +271,8 @@ static void drawUi(Model& m,XrApp* xr) {
         ImGui::End();return;
     }
     auto* raw=m.raw();ImGui::Text("Vive tracker: %s",raw&&raw->fresh()?"Pose received":"Waiting for poses");
+    if(m.hasFit&&!m.validationRunning)ImGui::TextColored({.05f,.5f,.25f,1},"CALIBRATED - alignment applied");
+    if(m.step==Step::Error)ImGui::TextColored({.75f,.12f,.08f,1},"CALIBRATION FAILED - see reason below");
     ImGui::TextWrapped("%s",m.message.c_str());ImGui::Spacing();ImGui::Separator();
     const bool busy=m.step==Step::Capture||m.step==Step::Fitting||m.validationRunning||m.service;
     const bool choosing=m.step==Step::Devices||m.step==Step::Error;
@@ -285,14 +291,15 @@ static void drawUi(Model& m,XrApp* xr) {
     }
     ImGui::Spacing();ImGui::TextWrapped("Attach the tracker firmly to the reference controller. Keep sensors uncovered. Move slowly through broad positions and rotations.");
     } else {ImGui::Text("Reference: %s controller",m.reference ? "Right":"Left");ImGui::Text("Tracker: %s",m.selected.c_str());}
-    if(m.step==Step::Capture){ImGui::ProgressBar(float(m.samples.size())/CaptureSamples,{-1,24});ImGui::Text("%zu / %zu samples (20 Hz; about 5 seconds)",m.samples.size(),CaptureSamples);if(ImGui::Button("Stop and fit",{-1,48}))action("fit");}
+    ImGui::BeginDisabled(!m.can("set_fast_mode"));bool fast=m.fastMode;if(ImGui::Checkbox("Fast mode",&fast))action("set_fast_mode",fast ? 1:0);ImGui::SameLine();ImGui::Text("%zu samples / ~%.1f seconds",m.captureTarget(),m.captureTarget()*SampleInterval);ImGui::EndDisabled();
+    if(m.step==Step::Capture){ImGui::ProgressBar(float(m.samples.size())/m.captureTarget(),{-1,24});ImGui::Text("%zu / %zu samples (20 Hz)",m.samples.size(),m.captureTarget());if(ImGui::Button("Stop and fit",{-1,48}))action("fit");}
     else if(m.step==Step::Fitting)ImGui::TextUnformatted("Fitting and checking reserved samples...");
     else if(!m.hasFit) {ImGui::BeginDisabled(!m.can("start_capture"));if(ImGui::Button("Start regular calibration",{-1,48}))action("start_capture");ImGui::EndDisabled();}
     if(m.hasFit&&!m.service) {
         ImGui::Separator();ImGui::TextUnformatted("LIVE VALIDATION");ImGui::Text("Position gap: %.1f mm    Angle gap: %.1f deg",m.instantPosition*1000,m.instantAngle);
         ImGui::TextWrapped("Teal ghost predicts the controller from the tracker. It should stay over the solid controller while the pair is attached.");
     if(m.validationRunning){ImGui::ProgressBar(float(std::min(1.0,double(m.validation.count)/ValidationSamples)),{-1,24});ImGui::Text("%zu / %zu samples; %.0f cm motion",m.validation.count,ValidationSamples,(m.validationMax-m.validationMin).norm()*100);if(ImGui::Button("Stop validation",{-1,40}))action("stop_validation");}
-        else if(!m.service&&ImGui::Button("Run separate validation",{-1,44}))action("start_validation");
+        else if(!m.service&&ImGui::Button("Check alignment (optional)",{-1,44}))action("start_validation");
         ImGui::Text("Validation RMS: %.1f mm / %.1f deg",m.validation.positionRms()*1000,m.validation.angleRms());
     }
     ImGui::BeginDisabled(!m.can("save_profile"));if(ImGui::Button("Save profile",{278,44}))action("save_profile");ImGui::EndDisabled();ImGui::SameLine();ImGui::BeginDisabled(!m.can("reset"));if(ImGui::Button("Start over",{278,44}))action("reset");ImGui::EndDisabled();
@@ -337,13 +344,15 @@ static std::string snapshot(Model& model,uint64_t frame,uint64_t requested,uint6
     for(int i=0;i<3;++i){const Located& value=i==0 ? model.head:model.grips[i-1];cJSON* device=pose(value.pose);cJSON_AddStringToObject(device,"name",i==0 ? "head":i==1 ? "left_controller":"right_controller");cJSON_AddStringToObject(device,"space","Quest STAGE");cJSON_AddNumberToObject(device,"location_flags",double(value.flags));cJSON_AddBoolToObject(device,"tracked",value.tracked());cJSON_AddItemToArray(devices,device);}
     for(const auto& entry:model.devices){cJSON* device=pose(entry.second.pose);cJSON_AddStringToObject(device,"name",entry.first.c_str());cJSON_AddStringToObject(device,"space","raw libsurvive world");cJSON_AddBoolToObject(device,"fresh",entry.second.fresh());cJSON_AddNumberToObject(device,"age_seconds",entry.second.age+std::chrono::duration<double>(Clock::now()-entry.second.received).count());cJSON_AddItemToArray(devices,device);}
     cJSON_AddStringToObject(root,"system_name",model.systemName.c_str());
-    cJSON_AddNumberToObject(root,"capture_target_samples",double(CaptureSamples));cJSON_AddNumberToObject(root,"validation_target_samples",double(ValidationSamples));cJSON_AddNumberToObject(root,"sample_rate_hz",1/SampleInterval);
+    cJSON_AddBoolToObject(root,"alignment_applied",model.hasFit);cJSON_AddBoolToObject(root,"profile_saved",model.step==Step::Saved);cJSON_AddNumberToObject(root,"fit_holdout_samples",double(model.result.reserved.count));cJSON_AddNumberToObject(root,"fit_holdout_position_rms_m",model.result.reserved.positionRms());
+    if(model.hasFit){cJSON_AddItemToObject(root,"quest_from_tracker_world",pose(model.result.world));cJSON_AddItemToObject(root,"tracker_from_controller_mount",pose(model.result.mount));cJSON* aligned=cJSON_AddArrayToObject(root,"aligned_trackers");for(const auto& entry:model.devices){cJSON* device=pose(Pose(model.result.world*entry.second.pose));cJSON_AddStringToObject(device,"name",entry.first.c_str());cJSON_AddStringToObject(device,"space","Quest STAGE");cJSON_AddItemToArray(aligned,device);}}
+    cJSON_AddBoolToObject(root,"fast_mode",model.fastMode);cJSON_AddNumberToObject(root,"capture_target_samples",double(model.captureTarget()));cJSON_AddNumberToObject(root,"validation_target_samples",double(ValidationSamples));cJSON_AddNumberToObject(root,"sample_rate_hz",1/SampleInterval);
     cJSON_AddBoolToObject(root,"device_models_open",model.modelSettings);
     cJSON* identities=cJSON_AddArrayToObject(root,"device_models");
     const auto identity=[&](const std::string& device,const device_models::Identity& id,const std::string& key,const std::string& choice){cJSON* item=cJSON_CreateObject();cJSON_AddStringToObject(item,"device",device.c_str());cJSON_AddStringToObject(item,"model_id",id.model.c_str());cJSON_AddStringToObject(item,"name",id.name.c_str());cJSON_AddStringToObject(item,"identity_source",id.source.c_str());cJSON_AddStringToObject(item,"reported",id.reported.c_str());cJSON_AddStringToObject(item,"selection",choice.c_str());cJSON_AddStringToObject(item,"asset_key",key.c_str());const auto* asset=model.models.find(key);cJSON_AddBoolToObject(item,"asset_loaded",asset&&asset->loaded());cJSON_AddStringToObject(item,"asset_error",asset ? asset->error.c_str():"No matching model");cJSON_AddBoolToObject(item,"generic_fallback",!asset||!asset->loaded());cJSON_AddItemToArray(identities,item);};
     for(int side=0;side<2;++side)identity(side ? "right_controller":"left_controller",model.controllerIdentity[side],model.controllerKey(side),model.controllerOverride[side]);
     for(const auto& entry:model.devices)identity(entry.first,entry.second.identity,entry.second.identity.model,"auto");
-    cJSON* actions=cJSON_AddObjectToObject(root,"actions");for(const char* action: {"select_reference","select_tracker","select_role","select_left_model","select_right_model","show_device_models","identify_reference","lock_map","start_capture","fit","start_validation","stop_validation","save_profile","load_profile","reset","start_service","place_panel","exit"})cJSON_AddBoolToObject(actions,action,model.can(action));
+    cJSON* actions=cJSON_AddObjectToObject(root,"actions");for(const char* action: {"select_reference","select_tracker","select_role","select_left_model","select_right_model","show_device_models","set_fast_mode","identify_reference","lock_map","start_capture","fit","start_validation","stop_validation","save_profile","load_profile","reset","start_service","place_panel","exit"})cJSON_AddBoolToObject(actions,action,model.can(action));
     cJSON* render=cJSON_AddObjectToObject(root,"render");cJSON_AddNumberToObject(render,"export_requested",double(requested));cJSON_AddNumberToObject(render,"export_completed",double(exported));cJSON_AddStringToObject(render,"last_export",exportPath.c_str());cJSON_AddStringToObject(render,"models","identity-selected textured meshes; generic fallback");
     return inspectionJson(root);
 }
@@ -361,6 +370,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
         RECT rect{0,0,1280,840};AdjustWindowRect(&rect,WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,FALSE);
         window=CreateWindowW(wc.lpszClassName,L"VDXR Tracker Calibration",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,CW_USEDEFAULT,CW_USEDEFAULT,rect.right-rect.left,rect.bottom-rect.top,nullptr,nullptr,instance,nullptr);ShowWindow(window,SW_SHOW);
         Model model;model.preview=preview;XrApp xr;
+        {std::ifstream file("data/calibration-settings.json");const std::string json((std::istreambuf_iterator<char>(file)),{});cJSON* settings=cJSON_Parse(json.c_str());const auto* value=cJSON_GetObjectItemCaseSensitive(settings,"fast_mode");if(cJSON_IsBool(value))model.fastMode=cJSON_IsTrue(value);cJSON_Delete(settings);}
         if(!preview) {
             model.owner=CreateMutexW(nullptr,TRUE,L"Local\\VDXR.Libsurvive.Writer.v1");if(!model.owner||GetLastError()==ERROR_ALREADY_EXISTS)throw std::runtime_error("Close the other tracker provider or calibration app first");
             xr.init(runtime);
@@ -372,7 +382,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
         auto& io=ImGui::GetIO();io.DisplaySize={620,820};io.IniFilename=nullptr;io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf",22);ImGui_ImplDX11_Init(renderer.device.Get(),renderer.context.Get());
         if(!preview){bool map=false;std::ifstream file(L"data/lighthouse.json");const std::string contents((std::istreambuf_iterator<char>(file)),{});map=contents.find("\"PositionSet\":\"1\"")!=std::string::npos;model.initHardware(map);}
         const auto started=Clock::now();auto previous=started;
-        bool oldTrigger=false;int pointingSide=0;uint64_t frameNumber=0,exportRequested=0,exportCompleted=0;std::string pendingExport,lastExport;
+        bool oldTrigger=false;int pointingSide=0;uint64_t frameNumber=0,exportRequested=0,exportCompleted=0;std::string pendingExport,lastExport,lastLoggedState;
         fs::create_directories(L"data/inspection");
         while(!exitRequested&&(!xr.quit||model.service)) {
             MSG msg;while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){TranslateMessage(&msg);DispatchMessageW(&msg);}
@@ -385,7 +395,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
                         if(pendingExport.empty()&&(view=="mirror"||view=="model_catalog"||(view=="left_eye"&&!preview&&!model.service))){pendingExport=view;++exportRequested;ok=true;cJSON_AddBoolToObject(reply,"accepted",true);cJSON_AddNumberToObject(reply,"export_ticket",double(exportRequested));}
                     }else {
                         const cJSON* value=cJSON_GetObjectItemCaseSensitive(request,"value");const int index=cJSON_IsNumber(value) ? value->valueint:0;const std::string text=cJSON_IsString(value) ? value->valuestring:"";
-                        ok=model.perform(op,preview||model.service ? nullptr:&xr,index,text);
+                        if(op!="set_fast_mode"||(cJSON_IsNumber(value)&&(value->valuedouble==0||value->valuedouble==1)))ok=model.perform(op,preview||model.service ? nullptr:&xr,index,text);
                     }
                 }
                 inspection.update(snapshot(model,frameNumber,exportRequested,exportCompleted,lastExport));
@@ -430,7 +440,9 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
                 for(int i=0;i<5;++i){Pose pose=Pose::Identity();pose.translation()=Eigen::Vector3d(i<2 ? -.22:i<4 ? 0:.22,0,i<4 ? (i%2 ? .09:-.09):0);model.models.draw(renderer,keys[i],pose,vp);}
                 renderer.exportPng(target.Get(),L"data/inspection/model-catalog.png");pendingExport.clear();exportCompleted=exportRequested;lastExport="data/inspection/model-catalog.png";
             }
-            ++frameNumber;inspection.update(snapshot(model,frameNumber,exportRequested,exportCompleted,lastExport));
+            ++frameNumber;const auto state=snapshot(model,frameNumber,exportRequested,exportCompleted,lastExport);inspection.update(state);
+            const std::string transition=std::string(model.phase())+":"+model.message;
+            if(transition!=lastLoggedState){try{atomicWrite(L"data/inspection/session-state.json",state);std::ofstream events("data/inspection/events.jsonl",std::ios::app);events<<state<<'\n';lastLoggedState=transition;}catch(...){} }
         }
         ImGui_ImplDX11_Shutdown();ImGui::DestroyContext();xr.close();DestroyWindow(window);return 0;
     }catch(const std::exception& error){
