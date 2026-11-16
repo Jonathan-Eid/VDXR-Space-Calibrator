@@ -1,0 +1,36 @@
+diff --git a/src/survive_default_devices.c b/src/survive_default_devices.c
+index dda231e..7feb942 100644
+--- a/src/survive_default_devices.c
++++ b/src/survive_default_devices.c
+@@ -532,7 +532,7 @@ static void lhdb_tag_value(struct json_callbacks *cb, struct json_stack_entry_s
+ 	SurviveContext *ctx = lhdb->ctx;
+ 
+ 	if (strcmp("base_serial_number", json_stack_tag(obj)) == 0) {
+-		lhdb->serials[lhdb->lh_found - 1] = atoi(json_stack_value(obj));
++		lhdb->serials[lhdb->lh_found - 1] = (uint32_t)strtoul(json_stack_value(obj), 0, 10);
+ 		SV_VERBOSE(105, "\tSerial number %8u", lhdb->serials[lhdb->lh_found - 1]);
+ 	} else if (json_has_ancestor_tag("pose", obj)) {
+ 		FLT v = atof(json_stack_value(obj));
+@@ -616,17 +616,19 @@ SURVIVE_EXPORT int survive_load_steamvr_lighthousedb_from_file(SurviveContext *c
+ 	if (ctx == 0)
+ 		return -1;
+ 
+-	FILE *fp = fopen(filename, "r");
++	FILE *fp = fopen(filename, "rb");
+ 	if (fp) {
+ 		fseek(fp, 0L, SEEK_END);
+ 		int len = ftell(fp);
+ 		fseek(fp, 0L, SEEK_SET);
+ 		if (len > 0) {
+-			char *ct0conf = (char *)malloc(len);
++			char *ct0conf = (char *)malloc((size_t)len + 1);
+ 			size_t read = fread(ct0conf, 1, len, fp);
+-			survive_load_steamvr_lighthousedb(ctx, ct0conf, len);
++			ct0conf[read] = 0;
++			int result = survive_load_steamvr_lighthousedb(ctx, ct0conf, (int)read);
+ 			free(ct0conf);
+ 			fclose(fp);
++			return result;
+ 		}
+ 		return 0;
+ 	}

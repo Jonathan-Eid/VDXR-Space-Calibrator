@@ -28,7 +28,7 @@ struct Metrics {
     bool passes() const { return count>=20 && positionRms()<=0.03 && maxPosition<=0.06 && maxAngle<=10; }
 };
 struct Fit { Pose world{Pose::Identity()}, mount{Pose::Identity()}; Metrics reserved; };
-struct FitDiagnostics { double rotationSecond{},rotationLast{},translationSmallest{};Metrics reserved; };
+struct FitDiagnostics { double rotationSecond{},rotationLast{},rotationAxisRatio{},translationSmallest{},translationCondition{};size_t rotationDeltaCount{};Metrics reserved; };
 inline Eigen::Matrix3d rotation(const Eigen::Matrix3d& matrix) {
     Eigen::JacobiSVD<Eigen::Matrix3d> svd(matrix,Eigen::ComputeFullU|Eigen::ComputeFullV);
     Eigen::Matrix3d sign=Eigen::Matrix3d::Identity();

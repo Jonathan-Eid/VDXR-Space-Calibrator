@@ -1,6 +1,6 @@
 The regular reference/target workflow is inspired by Hyblocker's Space Calibrator:
 https://github.com/hyblocker/OpenVR-SpaceCalibrator
-No Space Calibrator source was incorporated into this implementation.
+The regular rotation/translation solver is adapted from its MIT-licensed source at commit 797e464dae298a03217e1bbea640e03781d37b9b. Copyright Hyblocker, Justin Li and other contributors. See licenses/SpaceCalibrator-MIT.txt. OpenVR runtime/driver code is not included.
 
 The versioned tracker IPC header originates in the experimental VDXR fork:
 https://github.com/Jonathan-Eid/VirtualDesktop-OpenXR

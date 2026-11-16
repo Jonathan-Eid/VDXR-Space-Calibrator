@@ -13,6 +13,13 @@ New-Item -ItemType Directory -Force -Path $BuildRoot | Out-Null
 $build=(Resolve-Path -LiteralPath $BuildRoot).Path
 Invoke-Checked git @('-C',$repo,'submodule','update','--init','--recursive')
 $surviveSource=Join-Path $repo 'external/libsurvive'
+$importPatch=Join-Path $repo 'patches/libsurvive-windows-steamvr-import.patch'
+& git -C $surviveSource apply --check $importPatch 2>$null
+if($LASTEXITCODE -eq 0){Invoke-Checked git @('-C',$surviveSource,'apply',$importPatch)}
+else {
+    & git -C $surviveSource apply --reverse --check $importPatch 2>$null
+    if($LASTEXITCODE -ne 0){throw 'Pinned libsurvive does not match the tested Windows database-import patch.'}
+}
 $surviveBuild=Join-Path $build 'libsurvive-build'
 $appBuild=Join-Path $build 'app-build'
 Invoke-Checked cmake @('-S',$surviveSource,'-B',$surviveBuild,'-G','Visual Studio 17 2022','-A','x64','-DUSE_SINGLE_PRECISION=OFF','-DENABLE_TESTS=OFF')
@@ -27,6 +34,7 @@ Copy-Item "$surviveBuild/Release/plugins/*.dll" -Destination "$package/plugins"
 Copy-Item -LiteralPath "$runtime/virtualdesktop-openxr.dll","$runtime/virtualdesktop-openxr.json" -Destination "$package/runtime"
 Copy-Item -LiteralPath "$repo/README.md","$repo/LICENSE","$repo/NOTICE","$PSScriptRoot/Inspect-App.ps1","$PSScriptRoot/Test-AppInspection.ps1" -Destination $package
 Copy-Item -LiteralPath "$repo/assets" -Destination $package -Recurse -Force
+Copy-Item -LiteralPath "$repo/licenses/SpaceCalibrator-MIT.txt" -Destination "$package/licenses/SpaceCalibrator-MIT.txt"
 Copy-Item -LiteralPath "$repo/assets/models/LICENSE-WebXR.md" -Destination "$package/licenses/WebXR-Input-Profiles.txt"
 New-Item -ItemType Directory -Force "$package/scripts" | Out-Null
 Copy-Item -LiteralPath "$PSScriptRoot/Install-TrackerModel.ps1","$PSScriptRoot/Import-DeviceModels.py" -Destination "$package/scripts"

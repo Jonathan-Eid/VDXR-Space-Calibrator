@@ -4,8 +4,12 @@
 #include "calibration_scene.h"
 #include "calibration_inspection.h"
 #include "device_models.h"
+#include "spacecal_regular.h"
 #include "vdxr_tracker_ipc.h"
+#define SURVIVE_ENABLE_FULL_API 1
+#define SURVIVE_IMPORT __declspec(dllimport)
 #include <libsurvive/survive_api.h>
+#include <libsurvive/survive.h>
 #undef float_format
 #include <imgui.h>
 #include <backends/imgui_impl_dx11.h>
@@ -62,6 +66,7 @@ struct Model {
     std::string selected,message="Connecting to tracker receivers...";
     Step step=Step::Devices;int reference=0,role=1;
     bool preview=false,mapLocked=false,hasFit=false,validationRunning=false,service=false;
+    bool roomSolverDisabled=false;
     double captureSeconds{},validationSeconds{},instantPosition{},instantAngle{},lastSample{};
     std::vector<Pair> samples;
     std::vector<std::string> captureTrace;
@@ -140,14 +145,13 @@ struct Model {
         mapLocked=lockMap;
         hardware=std::async(std::launch::async,[lockMap,previous]() {
             if(previous)survive_simple_close(previous);
-            SetEnvironmentVariableA("SURVIVE_GLOBALSCENESOLVER",lockMap ? "0":"1");
-            char program[]="vdxr-calibration",flag[]="--configfile",path[]="./data/lighthouse.json";char* args[]{program,flag,path};
-            auto* context=survive_simple_init(3,args);if(!context)throw std::runtime_error("Tracker initialization failed");survive_simple_start_thread(context);return context;
+            char program[]="vdxr-calibration",flag[]="--configfile",path[]="./data/lighthouse.json",disable[]="--disable-calibrate",enabled[]="1",disabled[]="0";char* args[]{program,flag,path,disable,lockMap ? enabled:disabled};
+            auto* context=survive_simple_init(5,args);if(!context)throw std::runtime_error("Tracker initialization failed");survive_simple_start_thread(context);return context;
         });
     }
     void pollHardware() {
         if(hardware.valid()&&hardware.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
-            try { source=hardware.get();message=mapLocked ? "Lighthouse map loaded. Select the device pair.":"Place the tracker stationary and visible, then lock its Lighthouse map."; }
+            try { source=hardware.get();roomSolverDisabled=survive_configi(survive_simple_get_ctx(source),"disable-calibrate",SC_GET,0)!=0;if(mapLocked&&!roomSolverDisabled)throw std::runtime_error("Room map lock was not honored by libsurvive");message=mapLocked ? "Lighthouse map loaded and scene solver disabled. Select the device pair.":"Place the tracker stationary and visible, then lock its Lighthouse map."; }
             catch(const std::exception& error){message=error.what();step=Step::Error;}
         }
         if(!source)return;
@@ -181,7 +185,7 @@ struct Model {
         }catch(const std::exception& error){captureExportError=error.what();captureFile.clear();}
         if(samples.size()<100){step=Step::Error;message="Too few valid samples. Record again with both devices tracked.";return;}
         const auto copy=samples;step=Step::Fitting;message="Checking movement and fitting room + mounting transforms...";
-        pendingFit=std::async(std::launch::async,[copy](){return calibration::fit(copy);});
+        pendingFit=std::async(std::launch::async,[copy](){return calibration::fitSpaceCalibrator(copy);});
     }
     void tick(XrApp* xr,XrTime time) {
         pollHardware();const auto now=Clock::now();const double delta=std::min(.05,std::chrono::duration<double>(now-lastTick).count());lastTick=now;
@@ -355,6 +359,7 @@ static std::string snapshot(Model& model,uint64_t frame,uint64_t requested,uint6
     for(int i=0;i<3;++i){const Located& value=i==0 ? model.head:model.grips[i-1];cJSON* device=pose(value.pose);cJSON_AddStringToObject(device,"name",i==0 ? "head":i==1 ? "left_controller":"right_controller");cJSON_AddStringToObject(device,"space","Quest STAGE");cJSON_AddNumberToObject(device,"location_flags",double(value.flags));cJSON_AddBoolToObject(device,"tracked",value.tracked());cJSON_AddItemToArray(devices,device);}
     for(const auto& entry:model.devices){cJSON* device=pose(entry.second.pose);cJSON_AddStringToObject(device,"name",entry.first.c_str());cJSON_AddStringToObject(device,"space","raw libsurvive world");cJSON_AddBoolToObject(device,"fresh",entry.second.fresh());cJSON_AddNumberToObject(device,"age_seconds",entry.second.age+std::chrono::duration<double>(Clock::now()-entry.second.received).count());cJSON_AddItemToArray(devices,device);}
     cJSON_AddStringToObject(root,"system_name",model.systemName.c_str());
+    cJSON_AddStringToObject(root,"calibration_solver","hyblocker_regular_kabsch_translation");cJSON_AddBoolToObject(root,"room_solver_disabled",model.roomSolverDisabled);
     cJSON_AddStringToObject(root,"capture_file",model.captureFile.c_str());cJSON_AddStringToObject(root,"capture_export_error",model.captureExportError.c_str());
     cJSON_AddBoolToObject(root,"alignment_applied",model.hasFit);cJSON_AddBoolToObject(root,"profile_saved",model.step==Step::Saved);cJSON_AddNumberToObject(root,"fit_holdout_samples",double(model.result.reserved.count));cJSON_AddNumberToObject(root,"fit_holdout_position_rms_m",model.result.reserved.positionRms());
     if(model.hasFit){cJSON_AddItemToObject(root,"quest_from_tracker_world",pose(model.result.world));cJSON_AddItemToObject(root,"tracker_from_controller_mount",pose(model.result.mount));cJSON* aligned=cJSON_AddArrayToObject(root,"aligned_trackers");for(const auto& entry:model.devices){cJSON* device=pose(Pose(model.result.world*entry.second.pose));cJSON_AddStringToObject(device,"name",entry.first.c_str());cJSON_AddStringToObject(device,"space","Quest STAGE");cJSON_AddItemToArray(aligned,device);}}
