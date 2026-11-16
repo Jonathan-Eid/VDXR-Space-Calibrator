@@ -7,6 +7,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <vector>
+#include <string>
 
 namespace calibration {
 using Pose = Eigen::Isometry3d;
@@ -27,13 +28,14 @@ struct Metrics {
     bool passes() const { return count>=20 && positionRms()<=0.03 && maxPosition<=0.06 && maxAngle<=10; }
 };
 struct Fit { Pose world{Pose::Identity()}, mount{Pose::Identity()}; Metrics reserved; };
+struct FitDiagnostics { double rotationSecond{},rotationLast{},translationSmallest{};Metrics reserved; };
 inline Eigen::Matrix3d rotation(const Eigen::Matrix3d& matrix) {
     Eigen::JacobiSVD<Eigen::Matrix3d> svd(matrix,Eigen::ComputeFullU|Eigen::ComputeFullV);
     Eigen::Matrix3d sign=Eigen::Matrix3d::Identity();
     sign(2,2)=(svd.matrixU()*svd.matrixV().transpose()).determinant();
     return svd.matrixU()*sign*svd.matrixV().transpose();
 }
-inline Fit fit(const std::vector<Pair>& pairs) {
+inline Fit fit(const std::vector<Pair>& pairs,FitDiagnostics* diagnostics=nullptr) {
     if(pairs.size()<100) throw std::runtime_error("Collect more valid samples before fitting");
     std::vector<Pair> train;
     for(size_t i=0;i<pairs.size();++i) if(i%5) train.push_back(pairs[i]);
@@ -58,8 +60,9 @@ inline Fit fit(const std::vector<Pair>& pairs) {
     }
     Eigen::JacobiSVD<Eigen::MatrixXd> svd(equations,Eigen::ComputeThinV);
     const auto singular=svd.singularValues();
-    if(singular[7]<0.05 || singular[8]>0.5*singular[7])
-        throw std::runtime_error("Pair slipped, tracking was unstable, or rotations were insufficient");
+    if(diagnostics){diagnostics->rotationSecond=singular[7];diagnostics->rotationLast=singular[8];}
+    if(singular[7]<0.05)throw std::runtime_error("Not enough independent rotation to solve the mounting offset (excitation "+std::to_string(singular[7])+")");
+    if(singular[8]>0.5*singular[7])throw std::runtime_error("Tracker/controller rotations disagree (consistency ratio "+std::to_string(singular[8]/singular[7])+", limit 0.5). See capture diagnostics.");
     Eigen::Matrix3d mr=Eigen::Map<const Eigen::Matrix<double,3,3,Eigen::ColMajor>>(svd.matrixV().col(8).data());
     if(mr.determinant()<0) mr=-mr;
     mr=rotation(mr);
@@ -67,6 +70,7 @@ inline Fit fit(const std::vector<Pair>& pairs) {
     for(size_t n=0;n<relative.size();++n)
         rhs.segment<3>(int(n)*3)=mr*relative[n].second.translation()-relative[n].first.translation();
     Eigen::JacobiSVD<Eigen::MatrixXd> translationSolver(lhs,Eigen::ComputeThinU|Eigen::ComputeThinV);
+    if(diagnostics)diagnostics->translationSmallest=translationSolver.singularValues()[2];
     if(translationSolver.singularValues()[2]<0.1)
         throw std::runtime_error("Rotate around more than one axis to measure the mounting offset");
     Fit result;
@@ -81,7 +85,8 @@ inline Fit fit(const std::vector<Pair>& pairs) {
     result.world.linear()=rotation(rotations/double(count));
     result.world.translation()=translations/double(count);
     for(size_t i=0;i<pairs.size();i+=5) result.reserved.add(pairs[i],result.world,result.mount);
-    if(!result.reserved.passes()) throw std::runtime_error("Fit rejected: device alignment did not stay consistent");
+    if(diagnostics)diagnostics->reserved=result.reserved;
+    if(!result.reserved.passes()) throw std::runtime_error("Alignment inconsistent: holdout position RMS "+std::to_string(result.reserved.positionRms()*1000)+" mm, max "+std::to_string(result.reserved.maxPosition*1000)+" mm; angle max "+std::to_string(result.reserved.maxAngle)+" deg. See capture diagnostics.");
     return result;
 }
 } // namespace calibration

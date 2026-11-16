@@ -22,7 +22,7 @@ Invoke-Checked cmake @('--build',$appBuild,'--config','Release','--parallel','2'
 Invoke-Checked ctest @('--test-dir',$appBuild,'-C','Release','--output-on-failure')
 $package=Join-Path $build 'package'
 foreach($folder in @($package,"$package/runtime","$package/plugins","$package/data","$package/licenses")){New-Item -ItemType Directory -Force -Path $folder | Out-Null}
-Copy-Item -LiteralPath "$appBuild/Release/vdxr-calibration.exe","$surviveBuild/Release/libsurvive.dll" -Destination $package
+Copy-Item -LiteralPath "$appBuild/Release/vdxr-calibration.exe","$appBuild/Release/calibration-replay.exe","$surviveBuild/Release/libsurvive.dll" -Destination $package
 Copy-Item "$surviveBuild/Release/plugins/*.dll" -Destination "$package/plugins"
 Copy-Item -LiteralPath "$runtime/virtualdesktop-openxr.dll","$runtime/virtualdesktop-openxr.json" -Destination "$package/runtime"
 Copy-Item -LiteralPath "$repo/README.md","$repo/LICENSE","$repo/NOTICE","$PSScriptRoot/Inspect-App.ps1","$PSScriptRoot/Test-AppInspection.ps1" -Destination $package

@@ -64,6 +64,8 @@ struct Model {
     bool preview=false,mapLocked=false,hasFit=false,validationRunning=false,service=false;
     double captureSeconds{},validationSeconds{},instantPosition{},instantAngle{},lastSample{};
     std::vector<Pair> samples;
+    std::vector<std::string> captureTrace;
+    std::string captureFile,captureExportError;
     Metrics validation;
     Eigen::Vector3d validationMin{Eigen::Vector3d::Zero()},validationMax{Eigen::Vector3d::Zero()};
     Eigen::Matrix3d validationFirst{Eigen::Matrix3d::Identity()};
@@ -165,7 +167,7 @@ struct Model {
         }
     }
     RawPose* raw() { const auto it=devices.find(selected);return it==devices.end() ? nullptr:&it->second; }
-    void reset() { hasFit=false;validationRunning=false;samples.clear();captureSeconds=validationSeconds=0;lastSample=0;validation={};step=Step::Devices;message="Select devices, attach them rigidly, then record."; }
+    void reset() { hasFit=false;validationRunning=false;samples.clear();captureTrace.clear();captureSeconds=validationSeconds=0;lastSample=0;validation={};step=Step::Devices;message="Select devices, attach them rigidly, then record."; }
     void startCapture() {
         if(preview){message="Preview contains simulated devices; hardware calibration is disabled.";return;}
         if(!mapLocked){message="Lock a stable Lighthouse map before recording.";return;}
@@ -173,6 +175,10 @@ struct Model {
         reset();step=Step::Capture;lastPair=Clock::now();message="Keep the pair rigid. Move slowly and rotate around several axes.";
     }
     void fitCapture() {
+        try {
+            fs::create_directories("data/captures");captureFile="data/captures/"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(GetTickCount64())+".csv";
+            std::ostringstream csv;csv<<"sx,sy,sz,sqx,sqy,sqz,sqw,tx,ty,tz,tqx,tqy,tqz,tqw,cx,cy,cz,cqx,cqy,cqz,cqw,ox,oy,oz,oqx,oqy,oqz,oqw,clock_seconds,source_time_seconds,source_age_seconds,target_flags,other_flags,reference_side\n";for(const auto& row:captureTrace)csv<<row<<'\n';atomicWrite(fs::path(captureFile).wstring().c_str(),csv.str());captureExportError.clear();
+        }catch(const std::exception& error){captureExportError=error.what();captureFile.clear();}
         if(samples.size()<100){step=Step::Error;message="Too few valid samples. Record again with both devices tracked.";return;}
         const auto copy=samples;step=Step::Fitting;message="Checking movement and fitting room + mounting transforms...";
         pendingFit=std::async(std::launch::async,[copy](){return calibration::fit(copy);});
@@ -193,7 +199,12 @@ struct Model {
                 if(r->sampleTime!=lastSample && std::chrono::duration<double>(now-lastPair).count()>=SampleInterval) {
                     const double pairDelta=std::min(.05,std::chrono::duration<double>(now-lastPair).count());
                     lastSample=r->sampleTime;lastPair=now;
-                    if(step==Step::Capture){samples.push_back(pair);captureSeconds+=pairDelta;}
+                    if(step==Step::Capture){
+                        samples.push_back(pair);captureSeconds+=pairDelta;
+                        const auto other=xr->grip(1-reference,time-XrTime(age*1e9));std::ostringstream row;row<<std::setprecision(17);
+                        const auto append=[&](const Pose& p){const Eigen::Quaterniond q(p.rotation());row<<p.translation().x()<<','<<p.translation().y()<<','<<p.translation().z()<<','<<q.x()<<','<<q.y()<<','<<q.z()<<','<<q.w()<<',';};
+                        append(pair.source);append(pair.target);append(grips[reference].pose);append(other.pose);row<<std::chrono::duration<double>(now.time_since_epoch()).count()<<','<<r->sampleTime<<','<<age<<','<<target.flags<<','<<other.flags<<','<<reference;captureTrace.push_back(row.str());
+                    }
                     if(validationRunning){
                         if(validation.count==0){validationMin=validationMax=pair.target.translation();validationFirst=pair.target.rotation();validationRotation=0;}
                         validationMin=validationMin.cwiseMin(pair.target.translation());validationMax=validationMax.cwiseMax(pair.target.translation());
@@ -344,6 +355,7 @@ static std::string snapshot(Model& model,uint64_t frame,uint64_t requested,uint6
     for(int i=0;i<3;++i){const Located& value=i==0 ? model.head:model.grips[i-1];cJSON* device=pose(value.pose);cJSON_AddStringToObject(device,"name",i==0 ? "head":i==1 ? "left_controller":"right_controller");cJSON_AddStringToObject(device,"space","Quest STAGE");cJSON_AddNumberToObject(device,"location_flags",double(value.flags));cJSON_AddBoolToObject(device,"tracked",value.tracked());cJSON_AddItemToArray(devices,device);}
     for(const auto& entry:model.devices){cJSON* device=pose(entry.second.pose);cJSON_AddStringToObject(device,"name",entry.first.c_str());cJSON_AddStringToObject(device,"space","raw libsurvive world");cJSON_AddBoolToObject(device,"fresh",entry.second.fresh());cJSON_AddNumberToObject(device,"age_seconds",entry.second.age+std::chrono::duration<double>(Clock::now()-entry.second.received).count());cJSON_AddItemToArray(devices,device);}
     cJSON_AddStringToObject(root,"system_name",model.systemName.c_str());
+    cJSON_AddStringToObject(root,"capture_file",model.captureFile.c_str());cJSON_AddStringToObject(root,"capture_export_error",model.captureExportError.c_str());
     cJSON_AddBoolToObject(root,"alignment_applied",model.hasFit);cJSON_AddBoolToObject(root,"profile_saved",model.step==Step::Saved);cJSON_AddNumberToObject(root,"fit_holdout_samples",double(model.result.reserved.count));cJSON_AddNumberToObject(root,"fit_holdout_position_rms_m",model.result.reserved.positionRms());
     if(model.hasFit){cJSON_AddItemToObject(root,"quest_from_tracker_world",pose(model.result.world));cJSON_AddItemToObject(root,"tracker_from_controller_mount",pose(model.result.mount));cJSON* aligned=cJSON_AddArrayToObject(root,"aligned_trackers");for(const auto& entry:model.devices){cJSON* device=pose(Pose(model.result.world*entry.second.pose));cJSON_AddStringToObject(device,"name",entry.first.c_str());cJSON_AddStringToObject(device,"space","Quest STAGE");cJSON_AddItemToArray(aligned,device);}}
     cJSON_AddBoolToObject(root,"fast_mode",model.fastMode);cJSON_AddNumberToObject(root,"capture_target_samples",double(model.captureTarget()));cJSON_AddNumberToObject(root,"validation_target_samples",double(ValidationSamples));cJSON_AddNumberToObject(root,"sample_rate_hz",1/SampleInterval);

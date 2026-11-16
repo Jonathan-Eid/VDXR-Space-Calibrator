@@ -61,3 +61,10 @@ Requires Windows x64, Visual Studio 2022 with C++ tools, CMake, Git, and NuGet a
 
 Fast mode is controlled through `set_fast_mode` (value 0 or 1), with `fast_mode` and `capture_target_samples` in state. State also exposes `alignment_applied`, `profile_saved`, fitted transforms and aligned tracker poses. Phase/message transitions are recorded locally in `data/inspection/events.jsonl` and the latest transition in `session-state.json`. These private inspection files are ignored by Git. A successful regular fit saves automatically; separate validation is optional for a new fit. Loading an older profile still requires validation in the current Quest space.
 
+
+## Diagnosing rejected captures
+
+Every completed capture is saved locally under `data/captures/` before fitting, including failures. `state.capture_file` identifies it; `capture_export_error` reports a save failure. CSV records include the tracker, selected controller at adjusted sample time, selected controller at current time, other controller at adjusted time, timestamps, age, flags and selected side. These are private local recordings and are excluded from Git.
+
+`calibration-replay.exe CAPTURE.csv [selected|current|other]` replays the native solver without writing or accepting a profile. It reports rotation excitation/consistency and reserved-sample residuals where available. The alternate targets are diagnostic comparisons, not automatic reference switching. A rejected run remains rejected; no quality thresholds were relaxed. The native tests include a smooth 100-sample capture with small pose noise, exact-transform recovery and stationary-motion rejection.
+
