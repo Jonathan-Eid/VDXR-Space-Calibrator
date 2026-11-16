@@ -1,0 +1,8 @@
+build/
+data/
+runtime/
+package/
+.vs/
+*.user
+*.log
+__pycache__/

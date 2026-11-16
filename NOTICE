@@ -1,0 +1,15 @@
+The regular reference/target workflow is inspired by Hyblocker's Space Calibrator:
+https://github.com/hyblocker/OpenVR-SpaceCalibrator
+No Space Calibrator source was incorporated into this implementation.
+
+The versioned tracker IPC header originates in the experimental VDXR fork:
+https://github.com/Jonathan-Eid/VirtualDesktop-OpenXR
+VDXR is based on the work of Matthieu Bucchianeri and Virtual Desktop contributors.
+
+Third-party source dependencies retain their respective licenses:
+Dear ImGui (MIT), cJSON (MIT), OpenXR SDK (Apache-2.0/MIT), libsurvive and
+its cnmatrix/cnkalman dependencies (MIT and bundled dependency notices),
+Eigen (MPL-2.0 and bundled notices).
+
+The app is an independent experimental project, not an official Virtual Desktop,
+Meta, HTC, Valve, or Space Calibrator product. Device meshes are procedural proxies.
