@@ -104,7 +104,7 @@ struct Input { float3 p:POSITION; float4 c:COLOR; float2 uv:TEXCOORD; };
 struct Output { float4 p:SV_POSITION; float4 c:COLOR; float2 uv:TEXCOORD; };
 Output VS(Input i) { Output o; o.p=mul(float4(i.p,1),vp);o.c=i.c;o.uv=i.uv;return o; }
 Texture2D image:register(t0); SamplerState samp:register(s0);
-float4 PS(Output i):SV_TARGET { return textured>.5 ? float4(image.Sample(samp,i.uv).rgb,1) : i.c; }
+float4 PS(Output i):SV_TARGET { return textured>.5 ? float4(image.Sample(samp,i.uv).rgb*i.c.rgb,1) : i.c; }
 )";
         ComPtr<ID3DBlob> v,p,error;
         check(D3DCompile(shader,sizeof(shader),nullptr,nullptr,nullptr,"VS","vs_5_0",0,0,&v,&error),"Compile scene vertex shader");

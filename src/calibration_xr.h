@@ -25,7 +25,7 @@ inline Pose fromXr(const XrPosef& input) {
 }
 struct Located { Pose pose{Pose::Identity()}; XrSpaceLocationFlags flags{}; bool tracked() const { return (flags&15)==15; } };
 #define CAL_XR_FUNCTIONS(F) \
-F(xrGetSystem) F(xrCreateSession) F(xrDestroySession) F(xrDestroyInstance) F(xrCreateReferenceSpace) F(xrPollEvent) \
+F(xrGetSystem) F(xrGetSystemProperties) F(xrGetCurrentInteractionProfile) F(xrPathToString) F(xrCreateSession) F(xrDestroySession) F(xrDestroyInstance) F(xrCreateReferenceSpace) F(xrPollEvent) \
 F(xrBeginSession) F(xrEndSession) F(xrRequestExitSession) F(xrWaitFrame) F(xrBeginFrame) F(xrEndFrame) \
 F(xrStringToPath) F(xrCreateActionSet) F(xrDestroyActionSet) F(xrCreateAction) F(xrSuggestInteractionProfileBindings) \
 F(xrAttachSessionActionSets) F(xrCreateActionSpace) F(xrSyncActions) F(xrGetActionStateFloat) F(xrApplyHapticFeedback) \
@@ -46,6 +46,7 @@ public:
     XrInstance instance{};XrSession session{};XrSpace stage{};
     Microsoft::WRL::ComPtr<ID3D11Device> device;
     bool quit{},recentered{},focused{};
+    std::string systemName,profiles[2];
     ~XrApp() { close(); }
     void init(const std::wstring& path) {
         library=LoadLibraryW(path.c_str());if(!library)throw std::runtime_error("Cannot load the app's VDXR runtime");
@@ -63,6 +64,7 @@ public:
 #undef RESOLVE
         XrSystemGetInfo systemInfo{XR_TYPE_SYSTEM_GET_INFO};systemInfo.formFactor=XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
         xrCheck(xrGetSystem(instance,&systemInfo,&system),"Connect Virtual Desktop to the Quest first");
+        XrSystemProperties properties{XR_TYPE_SYSTEM_PROPERTIES};xrCheck(xrGetSystemProperties(instance,system,&properties),"Read headset identity");systemName=properties.systemName;
         XrGraphicsRequirementsD3D11KHR requirements{XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR};xrCheck(xrGetD3D11GraphicsRequirementsKHR(instance,system,&requirements),"Query graphics requirements");
         using Microsoft::WRL::ComPtr;ComPtr<IDXGIFactory1> factory;if(FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))throw std::runtime_error("Create GPU factory");
         ComPtr<IDXGIAdapter1> adapter;
@@ -110,6 +112,9 @@ public:
         XrActiveActionSet active{actionSet,XR_NULL_PATH};XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};sync.countActiveActionSets=1;sync.activeActionSets=&active;const auto result=xrSyncActions(session,&sync);xrCheck(result,"Read controls");focused=result==XR_SUCCESS;return true;
     }
     XrTime now() { LARGE_INTEGER qpc;QueryPerformanceCounter(&qpc);XrTime time;xrCheck(xrConvertWin32PerformanceCounterToTimeKHR(instance,&qpc,&time),"Read pose time");return time; }
+    void identities() {
+        for(int side=0;side<2;++side){XrInteractionProfileState state{XR_TYPE_INTERACTION_PROFILE_STATE};profiles[side].clear();if(XR_SUCCEEDED(xrGetCurrentInteractionProfile(session,hands[side],&state))&&state.interactionProfile){char text[XR_MAX_PATH_LENGTH]{};uint32_t count;if(XR_SUCCEEDED(xrPathToString(instance,state.interactionProfile,sizeof(text),&count,text)))profiles[side]=text;}}
+    }
     Located locate(XrSpace space,XrTime time) { XrSpaceLocation l{XR_TYPE_SPACE_LOCATION};xrCheck(xrLocateSpace(space,stage,time,&l),"Read device pose");return {fromXr(l.pose),l.locationFlags}; }
     Located head(XrTime time) { return locate(view,time); }
     Located grip(int side,XrTime time) { return locate(grips[side],time); }

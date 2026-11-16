@@ -11,5 +11,10 @@ Dear ImGui (MIT), cJSON (MIT), OpenXR SDK (Apache-2.0/MIT), libsurvive and
 its cnmatrix/cnkalman dependencies (MIT and bundled dependency notices),
 Eigen (MPL-2.0 and bundled notices).
 
+Controller assets come from the MIT-licensed WebXR Input Profiles project,
+commit f4992299601614adbfefd398dc8e281556bb7444. See assets/models/LICENSE-WebXR.md.
+They depict manufacturer trademarks solely to identify the corresponding devices.
+The owner's HTC tracker asset is a private local import and is not redistributed.
+
 The app is an independent experimental project, not an official Virtual Desktop,
-Meta, HTC, Valve, or Space Calibrator product. Device meshes are procedural proxies.
+Meta, HTC, Valve, or Space Calibrator product. Unknown devices use generic markers.

@@ -26,11 +26,16 @@ Copy-Item -LiteralPath "$appBuild/Release/vdxr-calibration.exe","$surviveBuild/R
 Copy-Item "$surviveBuild/Release/plugins/*.dll" -Destination "$package/plugins"
 Copy-Item -LiteralPath "$runtime/virtualdesktop-openxr.dll","$runtime/virtualdesktop-openxr.json" -Destination "$package/runtime"
 Copy-Item -LiteralPath "$repo/README.md","$repo/LICENSE","$repo/NOTICE","$PSScriptRoot/Inspect-App.ps1","$PSScriptRoot/Test-AppInspection.ps1" -Destination $package
+Copy-Item -LiteralPath "$repo/assets" -Destination $package -Recurse -Force
+Copy-Item -LiteralPath "$repo/assets/models/LICENSE-WebXR.md" -Destination "$package/licenses/WebXR-Input-Profiles.txt"
+New-Item -ItemType Directory -Force "$package/scripts" | Out-Null
+Copy-Item -LiteralPath "$PSScriptRoot/Install-TrackerModel.ps1","$PSScriptRoot/Import-DeviceModels.py" -Destination "$package/scripts"
 Copy-Item -LiteralPath "$repo/external/imgui/LICENSE.txt" -Destination "$package/licenses/ImGui.txt"
 Copy-Item -LiteralPath "$repo/external/libsurvive/LICENSE" -Destination "$package/licenses/libsurvive.txt"
 Copy-Item -LiteralPath "$repo/external/libsurvive/libs/cnmatrix/LICENSE" -Destination "$package/licenses/cnmatrix.txt"
 Copy-Item -LiteralPath "$repo/external/libsurvive/libs/cnkalman/LICENSE" -Destination "$package/licenses/cnkalman.txt"
 Copy-Item -LiteralPath "$repo/external/cJSON/LICENSE" -Destination "$package/licenses/cJSON.txt"
 Copy-Item -LiteralPath "$surviveBuild/libs/cnmatrix/libeigen-src/COPYING.MPL2" -Destination "$package/licenses/Eigen-MPL2.txt"
+if(Test-Path -LiteralPath "$runtime/../../LICENSE"){Copy-Item -LiteralPath "$runtime/../../LICENSE" -Destination "$package/licenses/VDXR.txt"}
 & "$PSScriptRoot/Test-AppInspection.ps1" -PackageDirectory $package
 Write-Output "App package: $package"

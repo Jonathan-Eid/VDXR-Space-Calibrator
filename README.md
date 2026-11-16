@@ -1,6 +1,16 @@
 # VDXR Space Calibrator: regular calibration app
 
-The app opens its own OpenXR session through the VDXR build beside the executable. It renders a floor grid, controller rays, simplified ringless Quest controller models and Vive-style tracker models, with the same controls available in a desktop window. These are procedural device representations, not manufacturer meshes.
+The app opens its own OpenXR session through the VDXR build beside the executable. It renders a floor grid, controller rays, textured Quest controller models and a locally installed HTC Tracker 3.0 model, with the same controls available in a desktop window. Unknown devices or missing assets use generic markers.
+
+## Device identification and models
+
+Quest 3/3S Touch Plus, Quest 2 Touch and Touch Pro have separate left/right WebXR Input Profiles meshes and textures. Models show static unpressed buttons. A specific controller interaction profile takes priority. This VDXR backend currently reports generic Touch, so the app selects the headset's default controller model and labels that source as **headset default (controller generation unreported)**. This is not proof of the physical controller generation. Unknown headsets/profiles stay generic.
+
+Open **Device models** to override each hand independently. Overrides persist in `data/device-models.json`, are labeled **manual override**, and do not change calibration transforms. Returning to Automatic uses runtime identity again. Quest 2 models are included for later use; this does not add headset/controller hardware pairing compatibility.
+
+Vive Tracker 3.0 is identified from factory `model_number` or `render_model` metadata, never its serial prefix. Its HTC model is a local import in `data/models/vive-tracker-3.vdm`. The developer's local package already has it installed from [HTC's official download](https://developer.vive.com/eu/hardware/tracker3/). Public source excludes that asset pending confirmed redistribution terms. `scripts/Install-TrackerModel.ps1 -PackageDirectory PATH` downloads and converts it locally without installing or running SteamVR. The build-time importer requires Python, numpy and Pillow; running the installed app does not.
+
+Provenance and license are in `assets/models/`. Model selection and static textured rendering are verified offline. Model-to-physical-device grip alignment, scale and pointer interaction still require the next headset test.
 
 ## Use
 
@@ -31,11 +41,11 @@ Use the app's own local named-pipe API, not computer use. The endpoint is `\\.\p
 
 `state` includes the mode, phase, frame/time, available actions, selections, coordinate frames, device poses/validity/age, operation progress, residuals, and render export receipts. Preview mode is explicitly `synthetic_preview` and cannot capture or save calibration data. Startup failures remain inspectable with `state` and `exit`, and are also written to `data/inspection/error.json`.
 
-Actions are `select_reference` (0 left, 1 right), `select_tracker` (serial string), `select_role` (role index), `identify_reference`, `lock_map`, `start_capture`, `fit`, `start_validation`, `stop_validation`, `save_profile`, `load_profile`, `reset`, `start_service`, `place_panel` and `exit`. They use the same guarded handlers as the UI. Unavailable actions are rejected; automation cannot bypass validation.
+Actions are `select_reference` (0 left, 1 right), `select_tracker` (serial string), `select_role` (role index), `select_left_model` and `select_right_model` (string model ID: `auto`, `meta-quest-touch-plus`, `oculus-touch-v3`, `meta-quest-touch-pro`, `generic`), `identify_reference`, `lock_map`, `start_capture`, `fit`, `start_validation`, `stop_validation`, `save_profile`, `load_profile`, `reset`, `start_service`, `place_panel` and `exit`. They use the same guarded handlers as the UI. Unavailable actions are rejected; automation cannot bypass validation.
 
-`export_frame` accepts `mirror` or `left_eye`. The acceptance response is not completion: poll `state.render.export_completed` for the returned ticket before reading the exported PNG. Only one export may be pending. Frame export writes to fixed app-owned inspection paths; it accepts no arbitrary file path. Inspect exported images directly. A timed-out mutating command must not be retried blindly; inspect the current state first.
+`show_device_models` (0/1) controls the settings view and `state.device_models_open` reports it. `state.device_models` reports each model ID, identity source, reported metadata/profile, override, asset key, load error and generic fallback. `export_frame` accepts `mirror`, `left_eye`, or `model_catalog`. The catalog shows Quest 3 left/right, Quest 2 left/right and the locally installed Tracker 3.0 using the native renderer; it is an offline asset view, not evidence of hardware detection. The acceptance response is not completion: poll `state.render.export_completed` for the returned ticket before reading the exported PNG. Only one export may be pending. Frame export writes to fixed app-owned inspection paths; it accepts no arbitrary file path. Inspect exported images directly. A timed-out mutating command must not be retried blindly; inspect the current state first.
 
-`Test-AppInspection.ps1 -PackageDirectory PATH` checks preview mode, selection, invalid inputs, acceptance guards, native frame exports, color channels and API shutdown. The native math test separately verifies known room/mount transforms and rejects degenerate motion.
+`Test-AppInspection.ps1 -PackageDirectory PATH` checks preview mode, selection, invalid inputs, acceptance guards, native frame exports, color channels and API shutdown. The native math test separately verifies known room/mount transforms and rejects degenerate motion. The identity test covers profile precedence, uncertainty, overrides and unknown hardware; preview tests load both Quest 2 and Quest 3 assets.
 
 ## Design provenance
 
@@ -46,4 +56,5 @@ This source is a standalone **VDXR-Space-Calibrator** app. The VDXR runtime fork
 ## Build from source
 
 Requires Windows x64, Visual Studio 2022 with C++ tools, CMake, Git, and NuGet available for libsurvive dependencies. Run scripts/Build.ps1 with -BuildRoot pointing to a build directory and -RuntimeDirectory pointing to the experimental VDXR DLL/JSON directory. The script initializes pinned source dependencies, builds double-precision libsurvive and the app, tests the solver and inspection API, and assembles a package. Personal room maps, recordings, and profiles belong in ignored data directories.
+
 
