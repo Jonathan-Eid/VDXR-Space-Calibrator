@@ -12,12 +12,12 @@ int main() try {
     };
     const Pose world=pose(), mount=pose();
     std::vector<Pair> pairs;
-    for(int i=0;i<200;++i) { const Pose source=pose(); pairs.push_back({source,world*source*mount}); }
+    for(int i=0;i<100;++i) { const Pose source=pose(); pairs.push_back({source,world*source*mount}); }
     const auto result=fit(pairs);
     if((result.world.matrix()-world.matrix()).norm()>1e-8 || (result.mount.matrix()-mount.matrix()).norm()>1e-8)
         throw std::runtime_error("Known room/mount transform not recovered");
     bool rejected=false;
-    try { fit(std::vector<Pair>(200,{Pose::Identity(),Pose::Identity()})); }
+    try { fit(std::vector<Pair>(100,{Pose::Identity(),Pose::Identity()})); }
     catch(const std::exception&) { rejected=true; }
     if(!rejected) throw std::runtime_error("Stationary input accepted");
     std::cout<<"Passed native rigid-pair fit, holdout metrics and degenerate rejection\n"; return 0;

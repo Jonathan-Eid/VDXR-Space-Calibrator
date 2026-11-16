@@ -22,6 +22,8 @@ using namespace calibration;
 using namespace scene;
 namespace fs=std::filesystem;
 using Clock=std::chrono::steady_clock;
+static constexpr size_t CaptureSamples=100,ValidationSamples=50;
+static constexpr double SampleInterval=.05;
 static bool exitRequested=false,mouseDown=false;
 static ULONGLONG mouseActiveUntil=0;
 static float mouseX=-1000,mouseY=-1000;
@@ -184,7 +186,7 @@ struct Model {
             if(valid) {
                 const Pair pair{r->pose,target.pose};
                 if(hasFit){Metrics metric;metric.add(pair,result.world,result.mount);instantPosition=metric.positionRms();instantAngle=metric.angleRms();}
-                if(r->sampleTime!=lastSample && std::chrono::duration<double>(now-lastPair).count()>=.015) {
+                if(r->sampleTime!=lastSample && std::chrono::duration<double>(now-lastPair).count()>=SampleInterval) {
                     const double pairDelta=std::min(.05,std::chrono::duration<double>(now-lastPair).count());
                     lastSample=r->sampleTime;lastPair=now;
                     if(step==Step::Capture){samples.push_back(pair);captureSeconds+=pairDelta;}
@@ -199,13 +201,13 @@ struct Model {
         }
         if(step==Step::Capture) {
             message=valid ? "Recording. Keep the pair rigid; use several rotation axes.":"Recording paused: waiting for both devices to be tracked.";
-            if(captureSeconds>=45)fitCapture();
+            if(samples.size()>=CaptureSamples)fitCapture();
         }
         const bool motionCovered=(validationMax-validationMin).norm()>=.25&&validationRotation>=.6;
-        if(validationRunning&&validationSeconds>=12&&!motionCovered)message="Validation needs broader movement: cover 25 cm and rotate around different directions.";
-        if(validationRunning&&validationSeconds>=12&&(motionCovered||validationSeconds>=60)) {
+        if(validationRunning&&validation.count>=ValidationSamples&&!motionCovered)message="Validation needs broader movement: cover 25 cm and rotate around different directions.";
+        if(validationRunning&&validation.count>=ValidationSamples&&(motionCovered||validationSeconds>=60)) {
             validationRunning=false;
-            if(motionCovered&&validation.passes()&&validation.count>=150){step=Step::Ready;message="Validation passed. Inspect the 3D overlay, then save the profile.";}
+            if(motionCovered&&validation.passes()){step=Step::Ready;message="Validation passed. Inspect the 3D overlay, then save the profile.";}
             else{step=Step::Validate;message="Validation failed. Inspect the gap, reattach the pair, and record again.";}
         }
         if(service)publish();
@@ -283,13 +285,13 @@ static void drawUi(Model& m,XrApp* xr) {
     }
     ImGui::Spacing();ImGui::TextWrapped("Attach the tracker firmly to the reference controller. Keep sensors uncovered. Move slowly through broad positions and rotations.");
     } else {ImGui::Text("Reference: %s controller",m.reference ? "Right":"Left");ImGui::Text("Tracker: %s",m.selected.c_str());}
-    if(m.step==Step::Capture){ImGui::ProgressBar(float(m.captureSeconds/45),{-1,24});ImGui::Text("%.0f / 45 valid seconds   %zu samples",m.captureSeconds,m.samples.size());if(ImGui::Button("Stop and fit",{-1,48}))action("fit");}
+    if(m.step==Step::Capture){ImGui::ProgressBar(float(m.samples.size())/CaptureSamples,{-1,24});ImGui::Text("%zu / %zu samples (20 Hz; about 5 seconds)",m.samples.size(),CaptureSamples);if(ImGui::Button("Stop and fit",{-1,48}))action("fit");}
     else if(m.step==Step::Fitting)ImGui::TextUnformatted("Fitting and checking reserved samples...");
     else if(!m.hasFit) {ImGui::BeginDisabled(!m.can("start_capture"));if(ImGui::Button("Start regular calibration",{-1,48}))action("start_capture");ImGui::EndDisabled();}
     if(m.hasFit&&!m.service) {
         ImGui::Separator();ImGui::TextUnformatted("LIVE VALIDATION");ImGui::Text("Position gap: %.1f mm    Angle gap: %.1f deg",m.instantPosition*1000,m.instantAngle);
         ImGui::TextWrapped("Teal ghost predicts the controller from the tracker. It should stay over the solid controller while the pair is attached.");
-    if(m.validationRunning){ImGui::ProgressBar(float(std::min(1.0,m.validationSeconds/12)),{-1,24});ImGui::Text("%.0f valid seconds; %.0f cm motion",m.validationSeconds,(m.validationMax-m.validationMin).norm()*100);if(ImGui::Button("Stop validation",{-1,40}))action("stop_validation");}
+    if(m.validationRunning){ImGui::ProgressBar(float(std::min(1.0,double(m.validation.count)/ValidationSamples)),{-1,24});ImGui::Text("%zu / %zu samples; %.0f cm motion",m.validation.count,ValidationSamples,(m.validationMax-m.validationMin).norm()*100);if(ImGui::Button("Stop validation",{-1,40}))action("stop_validation");}
         else if(!m.service&&ImGui::Button("Run separate validation",{-1,44}))action("start_validation");
         ImGui::Text("Validation RMS: %.1f mm / %.1f deg",m.validation.positionRms()*1000,m.validation.angleRms());
     }
@@ -335,6 +337,7 @@ static std::string snapshot(Model& model,uint64_t frame,uint64_t requested,uint6
     for(int i=0;i<3;++i){const Located& value=i==0 ? model.head:model.grips[i-1];cJSON* device=pose(value.pose);cJSON_AddStringToObject(device,"name",i==0 ? "head":i==1 ? "left_controller":"right_controller");cJSON_AddStringToObject(device,"space","Quest STAGE");cJSON_AddNumberToObject(device,"location_flags",double(value.flags));cJSON_AddBoolToObject(device,"tracked",value.tracked());cJSON_AddItemToArray(devices,device);}
     for(const auto& entry:model.devices){cJSON* device=pose(entry.second.pose);cJSON_AddStringToObject(device,"name",entry.first.c_str());cJSON_AddStringToObject(device,"space","raw libsurvive world");cJSON_AddBoolToObject(device,"fresh",entry.second.fresh());cJSON_AddNumberToObject(device,"age_seconds",entry.second.age+std::chrono::duration<double>(Clock::now()-entry.second.received).count());cJSON_AddItemToArray(devices,device);}
     cJSON_AddStringToObject(root,"system_name",model.systemName.c_str());
+    cJSON_AddNumberToObject(root,"capture_target_samples",double(CaptureSamples));cJSON_AddNumberToObject(root,"validation_target_samples",double(ValidationSamples));cJSON_AddNumberToObject(root,"sample_rate_hz",1/SampleInterval);
     cJSON_AddBoolToObject(root,"device_models_open",model.modelSettings);
     cJSON* identities=cJSON_AddArrayToObject(root,"device_models");
     const auto identity=[&](const std::string& device,const device_models::Identity& id,const std::string& key,const std::string& choice){cJSON* item=cJSON_CreateObject();cJSON_AddStringToObject(item,"device",device.c_str());cJSON_AddStringToObject(item,"model_id",id.model.c_str());cJSON_AddStringToObject(item,"name",id.name.c_str());cJSON_AddStringToObject(item,"identity_source",id.source.c_str());cJSON_AddStringToObject(item,"reported",id.reported.c_str());cJSON_AddStringToObject(item,"selection",choice.c_str());cJSON_AddStringToObject(item,"asset_key",key.c_str());const auto* asset=model.models.find(key);cJSON_AddBoolToObject(item,"asset_loaded",asset&&asset->loaded());cJSON_AddStringToObject(item,"asset_error",asset ? asset->error.c_str():"No matching model");cJSON_AddBoolToObject(item,"generic_fallback",!asset||!asset->loaded());cJSON_AddItemToArray(identities,item);};
