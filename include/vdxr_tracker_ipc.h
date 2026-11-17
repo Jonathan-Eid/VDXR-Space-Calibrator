@@ -14,6 +14,10 @@ namespace external_trackers {
 inline constexpr wchar_t MappingName[] = L"Local\\VDXR.Libsurvive.v1";
 inline constexpr wchar_t MutexName[] = L"Local\\VDXR.Libsurvive.Lock.v1";
 inline constexpr uint32_t Magic = 0x56585431;
+inline constexpr wchar_t UltimateMappingName[] = L"Local\\VDXR.Ultimate.v1";
+inline constexpr wchar_t UltimateMutexName[] = L"Local\\VDXR.Ultimate.Lock.v1";
+inline constexpr wchar_t UltimateWriterName[] = L"Local\\VDXR.Ultimate.Writer.v1";
+inline constexpr uint32_t UltimateMagic = 0x56585531;
 inline constexpr std::array<const char*, 14> Roles = {
     "chest", "waist", "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
     "left_wrist", "right_wrist", "left_knee", "right_knee", "left_ankle", "right_ankle",

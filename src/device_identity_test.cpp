@@ -16,5 +16,8 @@ int main(){try{
     require(tracker("{\"render_model\":\"{htc}vr_tracker_vive_3_0\"}").model=="vive-tracker-3","Factory render-model ID");
     require(tracker("{\"serial_number\":\"LHR-EXAMPLE\",\"model_number\":\"VIVE Tracker 2.0\"}").model=="generic","Serial prefix does not identify tracker generation");
     require(tracker("invalid").model=="generic","Bad metadata remains unknown");
+    const auto ultimate=ultimateTracker("rf:233205ad6c13");
+    require(ultimate.model=="vive-ultimate-tracker"&&ultimate.name=="VIVE Ultimate Tracker","Explicit Ultimate source selects the Ultimate model");
+    require(ultimate.source.find("radio ID only")!=std::string::npos&&ultimate.reported=="rf:233205ad6c13","Ultimate identity must not claim a factory serial");
     std::cout<<"Passed device identity precedence, uncertainty, overrides and unknown-device handling\n";return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

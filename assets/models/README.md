@@ -14,8 +14,9 @@ implemented. Mild baked normal shading is added for the diagnostic renderer.
 Rebuild using scripts/Import-DeviceModels.py SOURCE.glb OUTPUT.vdm (Python,
 numpy, Pillow). Python is not needed to run the app.
 
-The HTC tracker asset is **not distributed here**. Install it locally from HTC's
-official download (no SteamVR installation is needed):
+The HTC tracker assets are **not distributed here**. Install the Vive Tracker
+3.0 model locally from HTC's official download (no SteamVR installation is
+needed):
 
     ./scripts/Install-TrackerModel.ps1 -PackageDirectory PATH
 
@@ -24,6 +25,17 @@ and imports its textured OBJ into ignored data/models/vive-tracker-3.vdm. It
 requires Python, numpy and Pillow at import time; running the app does not.
 It saves source/output hashes in a local provenance receipt. Keep imported HTC
 files out of public source/releases until redistribution terms are confirmed.
+
+For a VIVE Ultimate Tracker, use the render model already installed by VIVE Hub:
+
+    ./scripts/Install-UltimateTrackerModel.ps1 -PackageDirectory PATH
+
+The installer checks standard VIVE Hub locations or accepts
+`-SourceDirectory PATH`. It converts the installed OBJ and its MTL-referenced
+base-color texture into ignored `data/models/vive-ultimate-tracker.vdm` and
+stores a local hash receipt. HTC's original model and texture are not copied,
+modified, downloaded, or checked into the project. Keep converted local assets
+out of public source/releases until redistribution terms are confirmed.
 
 An absent/failed asset is reported through the inspection API and falls back to
 a generic marker. Never identify tracker generation from its serial prefix.

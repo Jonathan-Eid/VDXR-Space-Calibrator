@@ -6,11 +6,16 @@
 #include "device_models.h"
 #include "spacecal_regular.h"
 #include "vdxr_tracker_ipc.h"
+#ifdef VDXR_HAS_ULTIMATE_SOURCE
+#include "ultimate_source_contract.h"
+#endif
+#ifdef VDXR_HAS_LIGHTHOUSE_SOURCE
 #define SURVIVE_ENABLE_FULL_API 1
 #define SURVIVE_IMPORT __declspec(dllimport)
 #include <libsurvive/survive_api.h>
 #include <libsurvive/survive.h>
 #undef float_format
+#endif
 #include <imgui.h>
 #include <backends/imgui_impl_dx11.h>
 #include <shellapi.h>
@@ -19,6 +24,8 @@
 #include <future>
 #include <iomanip>
 #include <map>
+#include <algorithm>
+#include <set>
 #include <chrono>
 #include <sstream>
 
@@ -56,14 +63,20 @@ static void atomicWrite(const fs::path& path,const std::string& contents) {
     const auto temp=path.wstring()+L".tmp";{std::ofstream file(temp,std::ios::binary);if(!file)throw std::runtime_error("Cannot save profile");file<<contents;if(!file)throw std::runtime_error("Profile write failed");}
     if(!MoveFileExW(temp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))throw std::runtime_error("Cannot finish profile save");
 }
-struct RawPose { Pose pose{Pose::Identity()}; device_models::Identity identity; double sampleTime{},age{}; Clock::time_point received{}; bool fresh() const { return sampleTime>0 && std::chrono::duration<double>(Clock::now()-received).count()+age<.1; } };
+struct RawPose { Pose pose{Pose::Identity()}; device_models::Identity identity; double sampleTime{},age{}; Clock::time_point received{}; int64_t sourceTimestampQpc{}; uint8_t sourceFlags{}; bool fresh() const { return sampleTime>0 && std::chrono::duration<double>(Clock::now()-received).count()+age<.1; } };
 enum class Step { Devices,Capture,Fitting,Validate,Ready,Saved,Error };
 struct Model {
+#ifdef VDXR_HAS_LIGHTHOUSE_SOURCE
     SurviveSimpleContext* source{};
     std::future<SurviveSimpleContext*> hardware;
+#endif
+#ifdef VDXR_HAS_ULTIMATE_SOURCE
+    std::unique_ptr<ultimate_hid::Source> ultimateSource;
+#endif
     std::future<Fit> pendingFit;
     std::map<std::string,RawPose> devices;
     std::string selected,message="Connecting to tracker receivers...";
+    std::string trackerSource="lighthouse",sourceTimeBasis="libsurvive_runtime";
     Step step=Step::Devices;int reference=0,role=1;
     bool preview=false,mapLocked=false,hasFit=false,validationRunning=false,service=false;
     bool roomSolverDisabled=false;
@@ -92,6 +105,16 @@ struct Model {
     HANDLE owner{},ipcMutex{},ipcMapping{};void* ipcView{};
     const char* phase() const { switch(step){case Step::Devices:return "devices";case Step::Capture:return "capture";case Step::Fitting:return "fitting";case Step::Validate:return "validate";case Step::Ready:return "ready_to_save";case Step::Saved:return "saved";default:return "error";} }
     bool busy() const { return step==Step::Capture||step==Step::Fitting||validationRunning||service; }
+    bool ultimate() const { return trackerSource=="ultimate"; }
+    fs::path profileDirectory() const { return ultimate() ? fs::path("data/ultimate") : fs::path("data"); }
+    fs::path profilePath() const { return profileDirectory()/"profile.json"; }
+    fs::path worldTransformPath() const { return profileDirectory()/"stage.txt"; }
+    fs::path mountTransformPath() const { return profileDirectory()/"mount.txt"; }
+    bool sourceReady() const {
+        const auto it=devices.find(selected);
+        if(it==devices.end()||!it->second.fresh())return false;
+        return ultimate() || mapLocked;
+    }
     bool can(const std::string& action) const {
         if(action=="exit")return true;
         if(action=="place_panel")return !service;
@@ -99,14 +122,21 @@ struct Model {
         if(action=="set_fast_mode")return !busy();
         if(action=="select_left_model"||action=="select_right_model")return !busy();
         if(action=="select_reference"||action=="select_tracker"||action=="select_role"||action=="reset")return !busy();
-        if(action=="start_capture")return !preview&&!busy()&&mapLocked&&grips[reference].tracked()&&devices.count(selected)&&devices.at(selected).fresh();
+        if(action=="start_capture")return !preview&&!busy()&&sourceReady()&&grips[reference].tracked();
         if(action=="fit")return step==Step::Capture;
         if(action=="start_validation")return !preview&&hasFit&&!busy();
         if(action=="stop_validation")return validationRunning;
         if(action=="save_profile")return !preview&&step==Step::Ready;
-        if(action=="load_profile")return !preview&&!busy()&&fs::exists("data/profile.json");
+        if(action=="load_profile")return !preview&&!busy()&&fs::exists(profilePath());
         if(action=="start_service")return !preview&&!service&&step==Step::Saved;
-        if(action=="lock_map")return !preview&&!busy()&&!mapLocked&&source&&!hardware.valid()&&devices.count(selected)&&devices.at(selected).fresh();
+        if(action=="lock_map") {
+            if(ultimate())return false;
+#ifdef VDXR_HAS_LIGHTHOUSE_SOURCE
+            return !preview&&!busy()&&!mapLocked&&source&&!hardware.valid()&&devices.count(selected)&&devices.at(selected).fresh();
+#else
+            return false;
+#endif
+        }
         if(action=="identify_reference")return !preview&&!service;
         return false;
     }
@@ -130,17 +160,27 @@ struct Model {
         else if(action=="start_service")startService();
         else if(action=="reset")reset();
         else if(action=="identify_reference"){if(!xr)return false;xr->identify(reference);}
-        else if(action=="lock_map"){auto* previous=source;source=nullptr;devices.clear();initHardware(true,previous);}
+        else if(action=="lock_map"){
+#ifdef VDXR_HAS_LIGHTHOUSE_SOURCE
+            auto* previous=source;source=nullptr;devices.clear();initHardware(true,previous);
+#endif
+        }
         else if(action=="exit")exitRequested=true;
         else if(action=="place_panel"){placed=false;rawPlaced=false;}
         return true;
     }
     ~Model() {
         if(pendingFit.valid()) pendingFit.wait();
+#ifdef VDXR_HAS_LIGHTHOUSE_SOURCE
         if(hardware.valid()) { try { auto* value=hardware.get();if(value)survive_simple_close(value); }catch(...){} }
         if(source)survive_simple_close(source);
+#endif
+#ifdef VDXR_HAS_ULTIMATE_SOURCE
+        if(ultimateSource)ultimateSource->stop();
+#endif
         if(ipcView)UnmapViewOfFile(ipcView);if(ipcMapping)CloseHandle(ipcMapping);if(ipcMutex)CloseHandle(ipcMutex);if(owner)CloseHandle(owner);
     }
+#ifdef VDXR_HAS_LIGHTHOUSE_SOURCE
     void initHardware(bool lockMap,SurviveSimpleContext* previous=nullptr) {
         mapLocked=lockMap;
         hardware=std::async(std::launch::async,[lockMap,previous]() {
@@ -149,7 +189,7 @@ struct Model {
             auto* context=survive_simple_init(5,args);if(!context)throw std::runtime_error("Tracker initialization failed");survive_simple_start_thread(context);return context;
         });
     }
-    void pollHardware() {
+    void pollLighthouseSource() {
         if(hardware.valid()&&hardware.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
             try { source=hardware.get();roomSolverDisabled=survive_configi(survive_simple_get_ctx(source),"disable-calibrate",SC_GET,0)!=0;if(mapLocked&&!roomSolverDisabled)throw std::runtime_error("Room map lock was not honored by libsurvive");message=mapLocked ? "Lighthouse map loaded and scene solver disabled. Select the device pair.":"Place the tracker stationary and visible, then lock its Lighthouse map."; }
             catch(const std::exception& error){message=error.what();step=Step::Error;}
@@ -170,18 +210,71 @@ struct Model {
             if(selected.empty())selected=serial;
         }
     }
+#endif
+    void initUltimateSource() {
+#ifdef VDXR_HAS_ULTIMATE_SOURCE
+        mapLocked=false;sourceTimeBasis="windows_qpc_arrival";
+        ultimateSource=std::make_unique<ultimate_hid::Source>();
+        if(!ultimateSource->start()) {
+            message="Could not start the passive Ultimate HID source: "+ultimateSource->error();step=Step::Error;return;
+        }
+        message="Waiting for a fresh full-pose report from the HTC tracker/map service.";
+#else
+        message="Ultimate tracker source was not included in this build. Rebuild with VDXR_ULTIMATE_SOURCE_DIR.";step=Step::Error;
+#endif
+    }
+    void pollUltimateSource() {
+#ifdef VDXR_HAS_ULTIMATE_SOURCE
+        if(!ultimateSource)return;
+        const auto poses=ultimateSource->snapshot();
+        LARGE_INTEGER qpcNow{},frequency{};
+        if(!QueryPerformanceCounter(&qpcNow)||!QueryPerformanceFrequency(&frequency)||frequency.QuadPart<=0)return;
+        std::set<std::string> present;
+        for(const auto& sourcePose:poses) {
+            double age{};
+            if(!ultimate_source_contract::validate(sourcePose,qpcNow.QuadPart,frequency.QuadPart,age))continue;
+            const auto key=ultimate_source_contract::deviceKey(sourcePose);
+            present.insert(key);
+            auto& raw=devices[key];
+            raw.pose=ultimate_source_contract::toCalibrationPose(sourcePose);
+            raw.identity=device_models::ultimateTracker(key);
+            raw.sampleTime=double(sourcePose.received_qpc)/double(frequency.QuadPart);
+            raw.age=age;
+            raw.received=Clock::now();
+            raw.sourceTimestampQpc=sourcePose.received_qpc;
+            raw.sourceFlags=sourcePose.flags;
+            if(selected.empty())selected=key;
+        }
+        for(auto& entry:devices)if(!present.count(entry.first))entry.second.sampleTime=0;
+        const bool anyFresh=std::any_of(devices.begin(),devices.end(),[](const auto& entry){return entry.second.fresh();});
+        if(!anyFresh) {
+            const std::string sourceError=ultimateSource->error();
+            message=sourceError.empty() ? "Waiting for a fresh full-pose report from the HTC tracker/map service." : sourceError;
+        } else if(step==Step::Devices) {
+            message="Ultimate raw pose is ready. Select the Quest controller and tracker; HTC map identity is not exposed by the HID source.";
+        }
+#endif
+    }
+    void pollHardware() {
+        if(ultimate()) { pollUltimateSource(); return; }
+#ifdef VDXR_HAS_LIGHTHOUSE_SOURCE
+        pollLighthouseSource();
+#else
+        if(step!=Step::Error){message="Lighthouse tracker source was not included in this build.";step=Step::Error;}
+#endif
+    }
     RawPose* raw() { const auto it=devices.find(selected);return it==devices.end() ? nullptr:&it->second; }
     void reset() { hasFit=false;validationRunning=false;samples.clear();captureTrace.clear();captureSeconds=validationSeconds=0;lastSample=0;validation={};step=Step::Devices;message="Select devices, attach them rigidly, then record."; }
     void startCapture() {
         if(preview){message="Preview contains simulated devices; hardware calibration is disabled.";return;}
-        if(!mapLocked){message="Lock a stable Lighthouse map before recording.";return;}
+        if(!sourceReady()){message=ultimate() ? "A fresh full-pose tracker sample and tracked Quest controller are required." : "Lock a stable Lighthouse map before recording.";return;}
         if(!raw()||!raw()->fresh()||!grips[reference].tracked()){message="Both selected devices must provide live poses.";return;}
         reset();step=Step::Capture;lastPair=Clock::now();message="Keep the pair rigid. Move slowly and rotate around several axes.";
     }
     void fitCapture() {
         try {
             fs::create_directories("data/captures");captureFile="data/captures/"+std::to_string(GetCurrentProcessId())+"-"+std::to_string(GetTickCount64())+".csv";
-            std::ostringstream csv;csv<<"sx,sy,sz,sqx,sqy,sqz,sqw,tx,ty,tz,tqx,tqy,tqz,tqw,cx,cy,cz,cqx,cqy,cqz,cqw,ox,oy,oz,oqx,oqy,oqz,oqw,clock_seconds,source_time_seconds,source_age_seconds,target_flags,other_flags,reference_side\n";for(const auto& row:captureTrace)csv<<row<<'\n';atomicWrite(fs::path(captureFile).wstring().c_str(),csv.str());captureExportError.clear();
+            std::ostringstream csv;csv<<"sx,sy,sz,sqx,sqy,sqz,sqw,tx,ty,tz,tqx,tqy,tqz,tqw,cx,cy,cz,cqx,cqy,cqz,cqw,ox,oy,oz,oqx,oqy,oqz,oqw,clock_seconds,source_time_seconds,source_age_seconds,target_flags,other_flags,reference_side,source_kind,source_id,source_flags,source_qpc\n";for(const auto& row:captureTrace)csv<<row<<'\n';atomicWrite(fs::path(captureFile).wstring().c_str(),csv.str());captureExportError.clear();
         }catch(const std::exception& error){captureExportError=error.what();captureFile.clear();}
         if(samples.size()<100){step=Step::Error;message="Too few valid samples. Record again with both devices tracked.";return;}
         const auto copy=samples;step=Step::Fitting;message="Checking movement and fitting room + mounting transforms...";
@@ -190,7 +283,16 @@ struct Model {
     void tick(XrApp* xr,XrTime time) {
         pollHardware();const auto now=Clock::now();const double delta=std::min(.05,std::chrono::duration<double>(now-lastTick).count());lastTick=now;
         if(pendingFit.valid()&&pendingFit.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
-            try { result=pendingFit.get();hasFit=true;step=Step::Ready;message="Calibrated. The tracker is now displayed in Quest space.";try{save();message="Calibrated and saved. The tracker is now displayed in Quest space.";}catch(const std::exception& error){message=std::string("Alignment applied, but saving failed: ")+error.what();} }
+            try {
+                result=pendingFit.get();hasFit=true;
+                if(ultimate()) {
+                    step=Step::Validate;
+                    message="Fit passed its reserved holdout. Run live validation in the current Quest and VIVE Hub map before saving or starting the tracker service.";
+                } else {
+                    step=Step::Ready;message="Calibrated. The tracker is now displayed in Quest space.";
+                    try{save();message="Calibrated and saved. The tracker is now displayed in Quest space.";}catch(const std::exception& error){message=std::string("Alignment applied, but saving failed: ")+error.what();}
+                }
+            }
             catch(const std::exception& error){hasFit=false;step=Step::Error;message=error.what();}
         }
         auto* r=raw();bool valid=r&&r->fresh()&&grips[reference].tracked()&&(!xr||xr->focused);
@@ -207,7 +309,7 @@ struct Model {
                         samples.push_back(pair);captureSeconds+=pairDelta;
                         const auto other=xr->grip(1-reference,time-XrTime(age*1e9));std::ostringstream row;row<<std::setprecision(17);
                         const auto append=[&](const Pose& p){const Eigen::Quaterniond q(p.rotation());row<<p.translation().x()<<','<<p.translation().y()<<','<<p.translation().z()<<','<<q.x()<<','<<q.y()<<','<<q.z()<<','<<q.w()<<',';};
-                        append(pair.source);append(pair.target);append(grips[reference].pose);append(other.pose);row<<std::chrono::duration<double>(now.time_since_epoch()).count()<<','<<r->sampleTime<<','<<age<<','<<target.flags<<','<<other.flags<<','<<reference;captureTrace.push_back(row.str());
+                        append(pair.source);append(pair.target);append(grips[reference].pose);append(other.pose);row<<std::chrono::duration<double>(now.time_since_epoch()).count()<<','<<r->sampleTime<<','<<age<<','<<target.flags<<','<<other.flags<<','<<reference<<','<<(ultimate() ? "ultimate_hid_arrival_qpc":"libsurvive_runtime")<<','<<selected<<','<<unsigned(r->sourceFlags)<<','<<r->sourceTimestampQpc;captureTrace.push_back(row.str());
                     }
                     if(validationRunning){
                         if(validation.count==0){validationMin=validationMax=pair.target.translation();validationFirst=pair.target.rotation();validationRotation=0;}
@@ -233,30 +335,51 @@ struct Model {
     }
     void save() {
         if(preview||step!=Step::Ready)return;
-        atomicWrite(L"data/stage.txt",poseText(result.world));atomicWrite(L"data/mount.txt",poseText(result.mount));
-        std::ostringstream json;json<<"{\n  \"kind\": \"regular\",\n  \"serial\": \""<<selected<<"\",\n  \"role\": \""<<external_trackers::Roles[role]<<"\",\n  \"fit_holdout_samples\": "<<result.reserved.count<<",\n  \"fit_holdout_position_rms_m\": "<<result.reserved.positionRms()<<",\n  \"fit_holdout_angle_rms_degrees\": "<<result.reserved.angleRms()<<",\n  \"validation_samples\": "<<validation.count<<",\n  \"position_rms_m\": "<<validation.positionRms()<<",\n  \"angle_rms_degrees\": "<<validation.angleRms()<<"\n}\n";
-        atomicWrite(L"data/profile.json",json.str());step=Step::Saved;message="Profile saved locally. Recalibrate after recentering or moving base stations.";
+        fs::create_directories(profileDirectory());
+        atomicWrite(worldTransformPath(),poseText(result.world));atomicWrite(mountTransformPath(),poseText(result.mount));
+        std::ostringstream json;
+        if(ultimate()) {
+            json<<"{\n  \"schema\": 2,\n  \"kind\": \"regular\",\n  \"source\": \"ultimate_hid\",\n  \"source_id\": \""<<selected<<"\",\n  \"source_map_id\": \"unknown: passive HID does not expose HTC map identity\",\n  \"role\": \""<<external_trackers::Roles[role]<<"\",\n";
+        } else {
+            json<<"{\n  \"kind\": \"regular\",\n  \"serial\": \""<<selected<<"\",\n  \"role\": \""<<external_trackers::Roles[role]<<"\",\n";
+        }
+        json<<"  \"fit_holdout_samples\": "<<result.reserved.count<<",\n  \"fit_holdout_position_rms_m\": "<<result.reserved.positionRms()<<",\n  \"fit_holdout_angle_rms_degrees\": "<<result.reserved.angleRms()<<",\n  \"validation_samples\": "<<validation.count<<",\n  \"position_rms_m\": "<<validation.positionRms()<<",\n  \"angle_rms_degrees\": "<<validation.angleRms()<<"\n}\n";
+        atomicWrite(profilePath(),json.str());step=Step::Saved;
+        message=ultimate() ? "Ultimate profile saved under data/ultimate. HTC map identity is unknown; validation is required after map/environment changes." : "Profile saved locally. Recalibrate after recentering or moving base stations.";
     }
     void load() {
         if(preview)return;
         try {
-            const auto read=[](const char* path){std::ifstream file(path);double x,y,z,qx,qy,qz,qw;if(!(file>>x>>y>>z>>qx>>qy>>qz>>qw))throw std::runtime_error("Saved transform is missing");Eigen::Quaterniond q(qw,qx,qy,qz);Eigen::Vector3d p(x,y,z);if(!p.allFinite()||!q.coeffs().allFinite()||std::abs(q.norm()-1)>.01)throw std::runtime_error("Saved transform is invalid");Pose value=Pose::Identity();value.linear()=q.normalized().toRotationMatrix();value.translation()=p;return value;};
-            std::ifstream profile("data/profile.json");const std::string json((std::istreambuf_iterator<char>(profile)),{});
+            const auto read=[](const fs::path& path){std::ifstream file(path);double x,y,z,qx,qy,qz,qw;if(!(file>>x>>y>>z>>qx>>qy>>qz>>qw))throw std::runtime_error("Saved transform is missing");Eigen::Quaterniond q(qw,qx,qy,qz);Eigen::Vector3d p(x,y,z);if(!p.allFinite()||!q.coeffs().allFinite()||std::abs(q.norm()-1)>.01)throw std::runtime_error("Saved transform is invalid");Pose value=Pose::Identity();value.linear()=q.normalized().toRotationMatrix();value.translation()=p;return value;};
+            std::ifstream profile(profilePath());const std::string json((std::istreambuf_iterator<char>(profile)),{});
             const auto value=[&](const std::string& key){auto i=json.find("\""+key+"\"");if(i==std::string::npos)throw std::runtime_error("Profile metadata is incomplete");i=json.find(':',i);i=json.find('"',i);const auto end=json.find('"',i+1);if(i==std::string::npos||end==std::string::npos)throw std::runtime_error("Invalid profile metadata");return json.substr(i+1,end-i-1);};
-            const auto serial=value("serial"),savedRole=value("role");int index=-1;for(int i=0;i<14;++i)if(savedRole==external_trackers::Roles[i])index=i;
-            if(index<0||serial.empty()||serial.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")!=std::string::npos)throw std::runtime_error("Unknown profile device or role");
-            result={};result.world=read("data/stage.txt");result.mount=read("data/mount.txt");selected=serial;role=index;hasFit=true;validation={};step=Step::Validate;message="Saved profile loaded. Validate it in the current room before enabling tracking.";
+            std::string serial;
+            if(ultimate()) {
+                if(value("source")!="ultimate_hid")throw std::runtime_error("This is not an Ultimate tracker profile");
+                serial=value("source_id");
+                if(serial.empty()||serial.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_:-")!=std::string::npos)throw std::runtime_error("Unknown Ultimate source identity");
+                if(!devices.count(serial)||!devices.at(serial).fresh())throw std::runtime_error("The profile's Ultimate tracker ID is not present with a fresh pose");
+                if(value("source_map_id").find("unknown:")!=0)throw std::runtime_error("Unexpected Ultimate map identity metadata");
+            } else {
+                serial=value("serial");
+                if(serial.empty()||serial.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")!=std::string::npos)throw std::runtime_error("Unknown profile device");
+            }
+            const auto savedRole=value("role");int index=-1;for(int i=0;i<14;++i)if(savedRole==external_trackers::Roles[i])index=i;
+            if(index<0)throw std::runtime_error("Unknown profile role");
+            result={};result.world=read(worldTransformPath());result.mount=read(mountTransformPath());selected=serial;role=index;hasFit=true;validation={};step=Step::Validate;message=ultimate() ? "Ultimate profile loaded. HTC map ID is unavailable; validate this transform in the current Quest and tracker map before enabling." : "Saved profile loaded. Validate it in the current room before enabling tracking.";
         }catch(const std::exception& error){message=error.what();}
     }
     void startService() {
         if(step!=Step::Saved)return;
-        ipcMutex=CreateMutexW(nullptr,FALSE,external_trackers::MutexName);ipcMapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(external_trackers::State),external_trackers::MappingName);
+        const auto mutexName=ultimate() ? external_trackers::UltimateMutexName:external_trackers::MutexName;
+        const auto mappingName=ultimate() ? external_trackers::UltimateMappingName:external_trackers::MappingName;
+        ipcMutex=CreateMutexW(nullptr,FALSE,mutexName);ipcMapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,sizeof(external_trackers::State),mappingName);
         if(ipcMapping)ipcView=MapViewOfFile(ipcMapping,FILE_MAP_WRITE,0,0,sizeof(external_trackers::State));
         if(!ipcMutex||!ipcView){message="Cannot start tracker transport.";return;}
         service=true;message="Tracking service active. Keep this window open while playing.";
     }
     void publish() {
-        external_trackers::State state;LARGE_INTEGER frequency,qpc;QueryPerformanceFrequency(&frequency);QueryPerformanceCounter(&qpc);state.frequency=frequency.QuadPart;state.samples[role].configured=1;
+        external_trackers::State state;if(ultimate())state.magic=external_trackers::UltimateMagic;LARGE_INTEGER frequency,qpc;QueryPerformanceFrequency(&frequency);QueryPerformanceCounter(&qpc);state.frequency=frequency.QuadPart;state.samples[role].configured=1;
         auto* r=raw();if(r&&r->fresh()) {
             const Pose p=result.world*r->pose;const Eigen::Quaterniond q(p.rotation());auto& sample=state.samples[role];
             const double age=r->age+std::chrono::duration<double>(Clock::now()-r->received).count();sample.qpc=qpc.QuadPart-int64_t(age*frequency.QuadPart);
@@ -269,7 +392,7 @@ struct Model {
 static void drawUi(Model& m,XrApp* xr) {
     const auto action=[&](const char* name,int index=0,const std::string& text=""){m.perform(name,xr,index,text);};
     ImGui::SetNextWindowPos({0,0});ImGui::SetNextWindowSize({620,820});
-    ImGui::Begin("VDXR Tracker Calibration",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings);
+    ImGui::Begin("VDXR Tracker Calibration",nullptr,ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings);
     ImGui::TextUnformatted("VDXR TRACKER CALIBRATION");ImGui::SameLine(490);if(ImGui::SmallButton("Exit"))action("exit");
     if(m.preview)ImGui::TextColored({.7f,.25f,.05f,1},"DESIGN PREVIEW - simulated devices");
     ImGui::TextWrapped("Regular calibration: Devices > Capture > Aligned and saved");ImGui::Separator();
@@ -285,7 +408,7 @@ static void drawUi(Model& m,XrApp* xr) {
         ImGui::Spacing();ImGui::TextWrapped("Model choices affect appearance only; tracking and calibration transforms stay the same.");
         ImGui::End();return;
     }
-    auto* raw=m.raw();ImGui::Text("Vive tracker: %s",raw&&raw->fresh()?"Pose received":"Waiting for poses");
+    auto* raw=m.raw();ImGui::Text("%s: %s",m.ultimate()?"VIVE Ultimate Tracker":"Vive tracker",raw&&raw->fresh()?"Pose received":"Waiting for poses");
     if(m.hasFit&&!m.validationRunning)ImGui::TextColored({.05f,.5f,.25f,1},"CALIBRATED - alignment applied");
     if(m.step==Step::Error)ImGui::TextColored({.75f,.12f,.08f,1},"CALIBRATION FAILED - see reason below");
     ImGui::TextWrapped("%s",m.message.c_str());ImGui::Spacing();ImGui::Separator();
@@ -294,16 +417,22 @@ static void drawUi(Model& m,XrApp* xr) {
     if(choosing) {
     ImGui::BeginDisabled(busy);
     const char* controllers[]{"Left Quest controller","Right Quest controller"};int reference=m.reference;ImGui::SetNextItemWidth(-1);if(ImGui::Combo("##reference",&reference,controllers,2))action("select_reference",reference);
-    ImGui::SetNextItemWidth(-1);if(ImGui::BeginCombo("##tracker",m.selected.empty()?"Choose Vive tracker":m.selected.c_str())) {
-        for(const auto& entry:m.devices)if(ImGui::Selectable(entry.first.c_str(),m.selected==entry.first))action("select_tracker",0,entry.first);ImGui::EndCombo();
+    const auto selectedDevice=m.devices.find(m.selected);
+    const std::string selectedTrackerLabel=m.selected.empty()?(m.ultimate()?"Choose VIVE Ultimate tracker":"Choose Vive tracker"):
+        selectedDevice!=m.devices.end()?selectedDevice->second.identity.name+" ("+m.selected+")":m.selected;
+    ImGui::SetNextItemWidth(-1);if(ImGui::BeginCombo("##tracker",selectedTrackerLabel.c_str())) {
+        for(const auto& entry:m.devices){const std::string label=entry.second.identity.name+" ("+entry.first+")";if(ImGui::Selectable(label.c_str(),m.selected==entry.first))action("select_tracker",0,entry.first);}ImGui::EndCombo();
     }
     ImGui::TextUnformatted("Tracker role");ImGui::SetNextItemWidth(-1);const char* roles[14];for(int i=0;i<14;++i)roles[i]=external_trackers::Roles[i];int role=m.role;if(ImGui::Combo("##role",&role,roles,14))action("select_role",role);
     ImGui::EndDisabled();
     if(ImGui::Button("Identify reference controller",{-1,44}))action("identify_reference");
-    if(!m.mapLocked&&!m.hardware.valid()&&m.source) {
+#ifdef VDXR_HAS_LIGHTHOUSE_SOURCE
+    if(!m.ultimate()&&!m.mapLocked&&!m.hardware.valid()&&m.source) {
         ImGui::TextWrapped("Keep the tracker stationary with clear base-station visibility before locking its map.");
         if(ImGui::Button("Lock Lighthouse map",{-1,44}))action("lock_map");
     }
+#endif
+    if(m.ultimate())ImGui::TextWrapped("Use your saved VIVE Hub room map. Recalibrate here after changing it or recentering the Quest.");
     ImGui::Spacing();ImGui::TextWrapped("Attach the tracker firmly to the reference controller. Keep sensors uncovered. Move slowly through broad positions and rotations.");
     } else {ImGui::Text("Reference: %s controller",m.reference ? "Right":"Left");ImGui::Text("Tracker: %s",m.selected.c_str());}
     ImGui::BeginDisabled(!m.can("set_fast_mode"));bool fast=m.fastMode;if(ImGui::Checkbox("Fast mode",&fast))action("set_fast_mode",fast ? 1:0);ImGui::SameLine();ImGui::Text("%zu samples / ~%.1f seconds",m.captureTarget(),m.captureTarget()*SampleInterval);ImGui::EndDisabled();
@@ -314,7 +443,7 @@ static void drawUi(Model& m,XrApp* xr) {
         ImGui::Separator();ImGui::TextUnformatted("LIVE VALIDATION");ImGui::Text("Position gap: %.1f mm    Angle gap: %.1f deg",m.instantPosition*1000,m.instantAngle);
         ImGui::TextWrapped("Teal ghost predicts the controller from the tracker. It should stay over the solid controller while the pair is attached.");
     if(m.validationRunning){ImGui::ProgressBar(float(std::min(1.0,double(m.validation.count)/ValidationSamples)),{-1,24});ImGui::Text("%zu / %zu samples; %.0f cm motion",m.validation.count,ValidationSamples,(m.validationMax-m.validationMin).norm()*100);if(ImGui::Button("Stop validation",{-1,40}))action("stop_validation");}
-        else if(!m.service&&ImGui::Button("Check alignment (optional)",{-1,44}))action("start_validation");
+        else if(!m.service&&ImGui::Button(m.ultimate()?"Validate alignment":"Check alignment (optional)",{-1,44}))action("start_validation");
         ImGui::Text("Validation RMS: %.1f mm / %.1f deg",m.validation.positionRms()*1000,m.validation.angleRms());
     }
     ImGui::BeginDisabled(!m.can("save_profile"));if(ImGui::Button("Save profile",{278,44}))action("save_profile");ImGui::EndDisabled();ImGui::SameLine();ImGui::BeginDisabled(!m.can("reset"));if(ImGui::Button("Start over",{278,44}))action("reset");ImGui::EndDisabled();
@@ -351,15 +480,15 @@ static void renderDevices(Model& m,Renderer& renderer,DirectX::FXMMATRIX vp) {
 
 static std::string snapshot(Model& model,uint64_t frame,uint64_t requested,uint64_t exported,const std::string& exportPath) {
     cJSON* root=cJSON_CreateObject();cJSON_AddNumberToObject(root,"schema",1);cJSON_AddNumberToObject(root,"pid",GetCurrentProcessId());cJSON_AddNumberToObject(root,"frame",double(frame));cJSON_AddNumberToObject(root,"uptime_ms",std::chrono::duration<double,std::milli>(Clock::now()-model.inspectionStarted).count());
-    cJSON_AddStringToObject(root,"mode",model.preview ? "synthetic_preview":model.service ? "fixed_tracking_service":"hardware_vr");cJSON_AddStringToObject(root,"phase",model.phase());cJSON_AddStringToObject(root,"message",model.message.c_str());
-    cJSON_AddStringToObject(root,"reference",model.reference ? "right":"left");cJSON_AddStringToObject(root,"tracker",model.selected.c_str());cJSON_AddStringToObject(root,"role",external_trackers::Roles[model.role]);cJSON_AddBoolToObject(root,"map_locked",model.mapLocked);cJSON_AddBoolToObject(root,"has_fit",model.hasFit);
+    cJSON_AddStringToObject(root,"mode",model.preview ? "synthetic_preview":model.service ? "fixed_tracking_service":"hardware_vr");cJSON_AddStringToObject(root,"phase",model.phase());cJSON_AddStringToObject(root,"message",model.message.c_str());cJSON_AddStringToObject(root,"tracker_source",model.trackerSource.c_str());cJSON_AddStringToObject(root,"source_time_basis",model.sourceTimeBasis.c_str());
+    cJSON_AddStringToObject(root,"reference",model.reference ? "right":"left");cJSON_AddStringToObject(root,"tracker",model.selected.c_str());cJSON_AddStringToObject(root,"role",external_trackers::Roles[model.role]);cJSON_AddBoolToObject(root,"map_locked",model.mapLocked);cJSON_AddBoolToObject(root,"source_ready",model.sourceReady());cJSON_AddStringToObject(root,"source_map_id",model.ultimate()?"unknown: passive HID does not expose HTC map identity":"Lighthouse map from data/lighthouse.json");cJSON_AddBoolToObject(root,"has_fit",model.hasFit);
     cJSON_AddNumberToObject(root,"capture_seconds",model.captureSeconds);cJSON_AddNumberToObject(root,"capture_samples",double(model.samples.size()));cJSON_AddBoolToObject(root,"validation_running",model.validationRunning);cJSON_AddNumberToObject(root,"validation_seconds",model.validationSeconds);cJSON_AddNumberToObject(root,"validation_samples",double(model.validation.count));cJSON_AddNumberToObject(root,"position_gap_m",model.instantPosition);cJSON_AddNumberToObject(root,"angle_gap_degrees",model.instantAngle);cJSON_AddNumberToObject(root,"validation_position_rms_m",model.validation.positionRms());cJSON_AddNumberToObject(root,"validation_angle_rms_degrees",model.validation.angleRms());
     const auto pose=[](const Pose& p){cJSON* object=cJSON_CreateObject();const Eigen::Quaterniond q(p.rotation());const double position[]{p.translation().x(),p.translation().y(),p.translation().z()},orientation[]{q.x(),q.y(),q.z(),q.w()};cJSON_AddItemToObject(object,"position_m",cJSON_CreateDoubleArray(position,3));cJSON_AddItemToObject(object,"orientation_xyzw",cJSON_CreateDoubleArray(orientation,4));return object;};
     cJSON* devices=cJSON_AddArrayToObject(root,"devices");
     for(int i=0;i<3;++i){const Located& value=i==0 ? model.head:model.grips[i-1];cJSON* device=pose(value.pose);cJSON_AddStringToObject(device,"name",i==0 ? "head":i==1 ? "left_controller":"right_controller");cJSON_AddStringToObject(device,"space","Quest STAGE");cJSON_AddNumberToObject(device,"location_flags",double(value.flags));cJSON_AddBoolToObject(device,"tracked",value.tracked());cJSON_AddItemToArray(devices,device);}
-    for(const auto& entry:model.devices){cJSON* device=pose(entry.second.pose);cJSON_AddStringToObject(device,"name",entry.first.c_str());cJSON_AddStringToObject(device,"space","raw libsurvive world");cJSON_AddBoolToObject(device,"fresh",entry.second.fresh());cJSON_AddNumberToObject(device,"age_seconds",entry.second.age+std::chrono::duration<double>(Clock::now()-entry.second.received).count());cJSON_AddItemToArray(devices,device);}
+    for(const auto& entry:model.devices){cJSON* device=pose(entry.second.pose);cJSON_AddStringToObject(device,"name",entry.first.c_str());cJSON_AddStringToObject(device,"space",model.ultimate()?"raw Ultimate tracker map frame":"raw libsurvive world");cJSON_AddStringToObject(device,"timestamp_basis",model.ultimate()?"host QPC at HID report arrival":"libsurvive runtime epoch");cJSON_AddNumberToObject(device,"source_qpc",double(entry.second.sourceTimestampQpc));cJSON_AddNumberToObject(device,"source_flags",double(entry.second.sourceFlags));cJSON_AddBoolToObject(device,"fresh",entry.second.fresh());cJSON_AddNumberToObject(device,"age_seconds",entry.second.age+std::chrono::duration<double>(Clock::now()-entry.second.received).count());cJSON_AddItemToArray(devices,device);}
     cJSON_AddStringToObject(root,"system_name",model.systemName.c_str());
-    cJSON_AddStringToObject(root,"calibration_solver","hyblocker_regular_kabsch_translation");cJSON_AddBoolToObject(root,"room_solver_disabled",model.roomSolverDisabled);
+    cJSON_AddStringToObject(root,"calibration_solver","hyblocker_regular_kabsch_translation");cJSON_AddBoolToObject(root,"room_solver_disabled",model.ultimate()?false:model.roomSolverDisabled);
     cJSON_AddStringToObject(root,"capture_file",model.captureFile.c_str());cJSON_AddStringToObject(root,"capture_export_error",model.captureExportError.c_str());
     cJSON_AddBoolToObject(root,"alignment_applied",model.hasFit);cJSON_AddBoolToObject(root,"profile_saved",model.step==Step::Saved);cJSON_AddNumberToObject(root,"fit_holdout_samples",double(model.result.reserved.count));cJSON_AddNumberToObject(root,"fit_holdout_position_rms_m",model.result.reserved.positionRms());
     if(model.hasFit){cJSON_AddItemToObject(root,"quest_from_tracker_world",pose(model.result.world));cJSON_AddItemToObject(root,"tracker_from_controller_mount",pose(model.result.mount));cJSON* aligned=cJSON_AddArrayToObject(root,"aligned_trackers");for(const auto& entry:model.devices){cJSON* device=pose(Pose(model.result.world*entry.second.pose));cJSON_AddStringToObject(device,"name",entry.first.c_str());cJSON_AddStringToObject(device,"space","Quest STAGE");cJSON_AddItemToArray(aligned,device);}}
@@ -369,6 +498,9 @@ static std::string snapshot(Model& model,uint64_t frame,uint64_t requested,uint6
     const auto identity=[&](const std::string& device,const device_models::Identity& id,const std::string& key,const std::string& choice){cJSON* item=cJSON_CreateObject();cJSON_AddStringToObject(item,"device",device.c_str());cJSON_AddStringToObject(item,"model_id",id.model.c_str());cJSON_AddStringToObject(item,"name",id.name.c_str());cJSON_AddStringToObject(item,"identity_source",id.source.c_str());cJSON_AddStringToObject(item,"reported",id.reported.c_str());cJSON_AddStringToObject(item,"selection",choice.c_str());cJSON_AddStringToObject(item,"asset_key",key.c_str());const auto* asset=model.models.find(key);cJSON_AddBoolToObject(item,"asset_loaded",asset&&asset->loaded());cJSON_AddStringToObject(item,"asset_error",asset ? asset->error.c_str():"No matching model");cJSON_AddBoolToObject(item,"generic_fallback",!asset||!asset->loaded());cJSON_AddItemToArray(identities,item);};
     for(int side=0;side<2;++side)identity(side ? "right_controller":"left_controller",model.controllerIdentity[side],model.controllerKey(side),model.controllerOverride[side]);
     for(const auto& entry:model.devices)identity(entry.first,entry.second.identity,entry.second.identity.model,"auto");
+    const char* catalogKeys[]{"meta-quest-touch-plus-left","meta-quest-touch-plus-right","oculus-touch-v3-left","oculus-touch-v3-right","meta-quest-touch-pro-left","meta-quest-touch-pro-right","vive-tracker-3","vive-ultimate-tracker"};
+    cJSON* catalog=cJSON_AddArrayToObject(root,"model_catalog");
+    for(const auto* key:catalogKeys){cJSON* item=cJSON_CreateObject();const auto* asset=model.models.find(key);cJSON_AddStringToObject(item,"model_id",key);cJSON_AddBoolToObject(item,"asset_loaded",asset&&asset->loaded());cJSON_AddStringToObject(item,"asset_error",asset?asset->error.c_str():"No matching model");cJSON_AddItemToArray(catalog,item);}
     cJSON* actions=cJSON_AddObjectToObject(root,"actions");for(const char* action: {"select_reference","select_tracker","select_role","select_left_model","select_right_model","show_device_models","set_fast_mode","identify_reference","lock_map","start_capture","fit","start_validation","stop_validation","save_profile","load_profile","reset","start_service","place_panel","exit"})cJSON_AddBoolToObject(actions,action,model.can(action));
     cJSON* render=cJSON_AddObjectToObject(root,"render");cJSON_AddNumberToObject(render,"export_requested",double(requested));cJSON_AddNumberToObject(render,"export_completed",double(exported));cJSON_AddStringToObject(render,"last_export",exportPath.c_str());cJSON_AddStringToObject(render,"models","identity-selected textured meshes; generic fallback");
     return inspectionJson(root);
@@ -381,15 +513,15 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
         CoInitializeEx(nullptr,COINIT_MULTITHREADED);
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         wchar_t executable[MAX_PATH];GetModuleFileNameW(nullptr,executable,MAX_PATH);const fs::path home=fs::path(executable).parent_path();SetCurrentDirectoryW(home.c_str());fs::create_directories(L"data");
-        int argc;LPWSTR* argv=CommandLineToArgvW(GetCommandLineW(),&argc);bool preview=false;double stopAfter=0;std::wstring runtime=(home/L"runtime/virtualdesktop-openxr.dll").wstring();
-        for(int i=1;i<argc;++i){const std::wstring arg=argv[i];if(arg==L"--preview")preview=true;else if(arg==L"--runtime"&&i+1<argc)runtime=argv[++i];else if(arg==L"--seconds"&&i+1<argc){stopAfter=std::stod(argv[++i]);boundedRun=true;}}LocalFree(argv);
+        int argc;LPWSTR* argv=CommandLineToArgvW(GetCommandLineW(),&argc);bool preview=false;double stopAfter=0;std::string trackerSource="lighthouse";std::wstring runtime=(home/L"runtime/virtualdesktop-openxr.dll").wstring();
+        for(int i=1;i<argc;++i){const std::wstring arg=argv[i];if(arg==L"--preview")preview=true;else if(arg==L"--runtime"&&i+1<argc)runtime=argv[++i];else if(arg==L"--tracker-source"&&i+1<argc){const std::wstring value=argv[++i];if(value==L"lighthouse")trackerSource="lighthouse";else if(value==L"ultimate")trackerSource="ultimate";else throw std::runtime_error("--tracker-source must be lighthouse or ultimate");}else if(arg==L"--seconds"&&i+1<argc){stopAfter=std::stod(argv[++i]);boundedRun=true;}}LocalFree(argv);
         WNDCLASSW wc{};wc.lpfnWndProc=windowProc;wc.hInstance=instance;wc.lpszClassName=L"VDXRCalibrationWindow";wc.hCursor=LoadCursor(nullptr,IDC_ARROW);RegisterClassW(&wc);
         RECT rect{0,0,1280,840};AdjustWindowRect(&rect,WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,FALSE);
         window=CreateWindowW(wc.lpszClassName,L"VDXR Tracker Calibration",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,CW_USEDEFAULT,CW_USEDEFAULT,rect.right-rect.left,rect.bottom-rect.top,nullptr,nullptr,instance,nullptr);ShowWindow(window,SW_SHOW);
-        Model model;model.preview=preview;XrApp xr;
+        Model model;model.preview=preview;model.trackerSource=trackerSource;XrApp xr;
         {std::ifstream file("data/calibration-settings.json");const std::string json((std::istreambuf_iterator<char>(file)),{});cJSON* settings=cJSON_Parse(json.c_str());const auto* value=cJSON_GetObjectItemCaseSensitive(settings,"fast_mode");if(cJSON_IsBool(value))model.fastMode=cJSON_IsTrue(value);cJSON_Delete(settings);}
         if(!preview) {
-            model.owner=CreateMutexW(nullptr,TRUE,L"Local\\VDXR.Libsurvive.Writer.v1");if(!model.owner||GetLastError()==ERROR_ALREADY_EXISTS)throw std::runtime_error("Close the other tracker provider or calibration app first");
+            model.owner=CreateMutexW(nullptr,TRUE,model.ultimate() ? external_trackers::UltimateWriterName:L"Local\\VDXR.Libsurvive.Writer.v1");if(!model.owner||GetLastError()==ERROR_ALREADY_EXISTS)throw std::runtime_error("Close the other tracker provider or calibration app first");
             xr.init(runtime);
         } else {if(FAILED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&xr.device,nullptr,nullptr)))throw std::runtime_error("Create preview device");model.message="Design preview. Calibration and saving are disabled.";}
         Renderer renderer;renderer.init(xr.device.Get(),window);model.models.init(xr.device.Get());
@@ -397,7 +529,16 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
         if(preview){model.systemName="Quest 3 (synthetic preview)";model.interactionProfiles[0]=model.interactionProfiles[1]="/interaction_profiles/oculus/touch_controller";}else model.systemName=xr.systemName;model.updateIdentities();
         IMGUI_CHECKVERSION();ImGui::CreateContext();ImGui::StyleColorsLight();auto& style=ImGui::GetStyle();style.WindowPadding={22,18};style.ItemSpacing={9,8};style.FramePadding={10,9};style.FrameRounding=6;style.WindowRounding=0;
         auto& io=ImGui::GetIO();io.DisplaySize={620,820};io.IniFilename=nullptr;io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf",22);ImGui_ImplDX11_Init(renderer.device.Get(),renderer.context.Get());
-        if(!preview){bool map=false;std::ifstream file(L"data/lighthouse.json");const std::string contents((std::istreambuf_iterator<char>(file)),{});map=contents.find("\"PositionSet\":\"1\"")!=std::string::npos;model.initHardware(map);}
+        if(!preview) {
+            if(model.ultimate())model.initUltimateSource();
+            else {
+#ifdef VDXR_HAS_LIGHTHOUSE_SOURCE
+                bool map=false;std::ifstream file(L"data/lighthouse.json");const std::string contents((std::istreambuf_iterator<char>(file)),{});map=contents.find("\"PositionSet\":\"1\"")!=std::string::npos;model.initHardware(map);
+#else
+                model.message="Lighthouse tracker source was not included in this build. Use --tracker-source ultimate.";model.step=Step::Error;
+#endif
+            }
+        }
         const auto started=Clock::now();auto previous=started;
         bool oldTrigger=false;int pointingSide=0;uint64_t frameNumber=0,exportRequested=0,exportCompleted=0;std::string pendingExport,lastExport,lastLoggedState;
         fs::create_directories(L"data/inspection");
@@ -424,7 +565,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
             const bool vrLive=!preview&&!model.service;
             XrFrameState frame{XR_TYPE_FRAME_STATE};XrTime time=0;
             if(vrLive){if(!xr.begin(frame)){Sleep(10);continue;}time=xr.now();if(frameNumber%90==0){xr.identities();for(int side=0;side<2;++side)model.interactionProfiles[side]=xr.profiles[side];model.updateIdentities();}model.head=xr.head(time);for(int side=0;side<2;++side){model.grips[side]=xr.grip(side,time);model.aims[side]=xr.aim(side,time);}if(xr.recentered){model.reset();model.placed=false;model.message="Quest reference changed. Recalibrate before saving or using a profile.";xr.recentered=false;}}
-            else if(preview) {model.head={Pose::Identity(),15};model.head.pose.translation()=Eigen::Vector3d(0,1.55,0);for(int side=0;side<2;++side){model.grips[side]={Pose::Identity(),15};model.grips[side].pose.translation()=Eigen::Vector3d(side ? .25:-.25,1.05,-.5);model.grips[side].pose.linear()=Eigen::AngleAxisd(-.4,Eigen::Vector3d::UnitX()).toRotationMatrix();}RawPose r;r.pose=Pose::Identity();r.pose.translation()=Eigen::Vector3d(.15,1,-.65);r.received=Clock::now();r.sampleTime=1;r.identity={"vive-tracker-3","Vive Tracker 3.0","synthetic preview fixture",""};model.devices["PREVIEW TRACKER"]=r;model.selected="PREVIEW TRACKER";}
+            else if(preview) {model.head={Pose::Identity(),15};model.head.pose.translation()=Eigen::Vector3d(0,1.55,0);for(int side=0;side<2;++side){model.grips[side]={Pose::Identity(),15};model.grips[side].pose.translation()=Eigen::Vector3d(side ? .25:-.25,1.05,-.5);model.grips[side].pose.linear()=Eigen::AngleAxisd(-.4,Eigen::Vector3d::UnitX()).toRotationMatrix();}RawPose r;r.pose=Pose::Identity();r.pose.translation()=Eigen::Vector3d(.15,1,-.65);r.received=Clock::now();r.sampleTime=1;if(model.ultimate()){r.identity=device_models::ultimateTracker("rf:preview-ultimate");r.identity.source="synthetic preview fixture";}else r.identity={"vive-tracker-3","Vive Tracker 3.0","synthetic preview fixture",""};model.devices[model.ultimate()?"PREVIEW ULTIMATE TRACKER":"PREVIEW TRACKER"]=r;model.selected=model.ultimate()?"PREVIEW ULTIMATE TRACKER":"PREVIEW TRACKER";}
             if(!model.placed&&model.head.tracked()&&(preview||(frameNumber>=10&&model.head.pose.translation().norm()>.0001))){const auto forward=model.head.pose.rotation()*Eigen::Vector3d(0,0,-1);const double yaw=std::atan2(-forward.x(),-forward.z());Pose anchor=Pose::Identity();anchor.linear()=Eigen::AngleAxisd(yaw,Eigen::Vector3d::UnitY()).toRotationMatrix();anchor.translation()=model.head.pose.translation();model.panelPose=anchor;model.panelPose.translation()=anchor*Eigen::Vector3d(-.72,0,-1.2);model.rawAnchor=anchor;model.rawAnchor.translation()=anchor*Eigen::Vector3d(.35,-.45,-1.0);model.placed=true;}
             model.tick(vrLive ? &xr:nullptr,time);
             float uiX=mouseX*620/620,uiY=mouseY*820/840;bool pressed=mouseDown;bool rayHit=false;Eigen::Vector3d rayEnd=Eigen::Vector3d::Zero();
@@ -453,8 +594,8 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int) {
                 D3D11_TEXTURE2D_DESC desc{};desc.Width=1280;desc.Height=840;desc.MipLevels=desc.ArraySize=1;desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.SampleDesc.Count=1;desc.BindFlags=D3D11_BIND_RENDER_TARGET;
                 ComPtr<ID3D11Texture2D> image;check(renderer.device->CreateTexture2D(&desc,nullptr,&image),"Model catalog image");ComPtr<ID3D11RenderTargetView> target;check(renderer.device->CreateRenderTargetView(image.Get(),nullptr,&target),"Model catalog view");renderer.setTarget(target.Get(),1280,840);
                 const auto view=DirectX::XMMatrixLookAtRH(DirectX::XMVectorSet(0,.36f,.52f,1),DirectX::XMVectorSet(0,0,0,1),DirectX::XMVectorSet(0,1,0,0));const auto vp=view*DirectX::XMMatrixPerspectiveFovRH(.9f,1280.f/840,.01f,5);
-                const char* keys[]{"meta-quest-touch-plus-left","meta-quest-touch-plus-right","oculus-touch-v3-left","oculus-touch-v3-right","vive-tracker-3"};
-                for(int i=0;i<5;++i){Pose pose=Pose::Identity();pose.translation()=Eigen::Vector3d(i<2 ? -.22:i<4 ? 0:.22,0,i<4 ? (i%2 ? .09:-.09):0);model.models.draw(renderer,keys[i],pose,vp);}
+                const char* keys[]{"meta-quest-touch-plus-left","meta-quest-touch-plus-right","oculus-touch-v3-left","oculus-touch-v3-right","meta-quest-touch-pro-left","meta-quest-touch-pro-right","vive-tracker-3","vive-ultimate-tracker"};
+                for(int i=0;i<8;++i){Pose pose=Pose::Identity();pose.translation()=Eigen::Vector3d((i%4-1.5)*.16,0,i<4 ? -.12:.12);model.models.draw(renderer,keys[i],pose,vp);}
                 renderer.exportPng(target.Get(),L"data/inspection/model-catalog.png");pendingExport.clear();exportCompleted=exportRequested;lastExport="data/inspection/model-catalog.png";
             }
             ++frameNumber;const auto state=snapshot(model,frameNumber,exportRequested,exportCompleted,lastExport);inspection.update(state);

@@ -63,7 +63,7 @@ public:
         CAL_XR_FUNCTIONS(RESOLVE)
 #undef RESOLVE
         XrSystemGetInfo systemInfo{XR_TYPE_SYSTEM_GET_INFO};systemInfo.formFactor=XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
-        xrCheck(xrGetSystem(instance,&systemInfo,&system),"Connect Virtual Desktop to the Quest first");
+        xrCheck(xrGetSystem(instance,&systemInfo,&system),"Connect the Quest through the Nightfall/VDXR streaming host first");
         XrSystemProperties properties{XR_TYPE_SYSTEM_PROPERTIES};xrCheck(xrGetSystemProperties(instance,system,&properties),"Read headset identity");systemName=properties.systemName;
         XrGraphicsRequirementsD3D11KHR requirements{XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR};xrCheck(xrGetD3D11GraphicsRequirementsKHR(instance,system,&requirements),"Query graphics requirements");
         using Microsoft::WRL::ComPtr;ComPtr<IDXGIFactory1> factory;if(FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))throw std::runtime_error("Create GPU factory");

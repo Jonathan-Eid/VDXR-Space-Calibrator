@@ -40,6 +40,14 @@ inline Identity tracker(const char* config) {
     }
     cJSON_Delete(json);return id;
 }
+inline Identity ultimateTracker(const std::string& radioId) {
+    Identity id;
+    id.model="vive-ultimate-tracker";
+    id.name="VIVE Ultimate Tracker";
+    id.source="Ultimate HID source; radio ID only (factory serial unavailable)";
+    id.reported=radioId;
+    return id;
+}
 struct Batch { std::vector<scene::Vertex> vertices;scene::ComPtr<ID3D11ShaderResourceView> texture; };
 struct Asset { std::vector<Batch> batches;std::string error;bool loaded()const{return !batches.empty();} };
 class Library {
@@ -54,13 +62,14 @@ class Library {
         D3D11_TEXTURE2D_DESC desc{};desc.Width=w;desc.Height=h;desc.MipLevels=desc.ArraySize=1;desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.SampleDesc.Count=1;desc.Usage=D3D11_USAGE_IMMUTABLE;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;D3D11_SUBRESOURCE_DATA initial{pixels.data(),w*4,0};ComPtr<ID3D11Texture2D> image;check(device->CreateTexture2D(&desc,&initial,&image),"Upload model texture");ComPtr<ID3D11ShaderResourceView> view;check(device->CreateShaderResourceView(image.Get(),nullptr,&view),"Model texture view");return view;
     }
 public:
-    void init(ID3D11Device* input) {device=input;for(const auto* model:{"meta-quest-touch-plus","oculus-touch-v3","meta-quest-touch-pro"})for(const auto* side:{"left","right"})load(std::string(model)+"-"+side);load("vive-tracker-3");}
+    void init(ID3D11Device* input) {device=input;for(const auto* model:{"meta-quest-touch-plus","oculus-touch-v3","meta-quest-touch-pro"})for(const auto* side:{"left","right"})load(std::string(model)+"-"+side);load("vive-tracker-3");load("vive-ultimate-tracker");}
     void load(const std::string& key) {
         Asset asset;
         try {
             std::filesystem::path path=std::filesystem::path("assets/models")/(key+".vdm");
             // Manufacturer assets imported by the owner stay private and out of source control.
             if(key=="vive-tracker-3")path="data/models/vive-tracker-3.vdm";
+            else if(key=="vive-ultimate-tracker")path="data/models/vive-ultimate-tracker.vdm";
             std::ifstream file(path,std::ios::binary);if(!file)throw std::runtime_error("Asset not installed");
             uint32_t header[3];read(file,header,sizeof(header));if(header[0]!=0x314d4456||header[1]!=1||!header[2]||header[2]>64)throw std::runtime_error("Invalid device asset header");
             for(uint32_t i=0;i<header[2];++i){uint32_t count,size;read(file,&count,4);read(file,&size,4);if(!count||count%3||count>100000||size>16*1024*1024)throw std::runtime_error("Device asset bounds exceeded");Batch batch;batch.vertices.resize(count);static_assert(sizeof(scene::Vertex)==36);read(file,batch.vertices.data(),count*sizeof(scene::Vertex));for(const auto& v:batch.vertices){const float* values=reinterpret_cast<const float*>(&v);for(int j=0;j<9;++j)if(!std::isfinite(values[j]))throw std::runtime_error("Nonfinite model vertex");if(std::abs(v.p.x)>1||std::abs(v.p.y)>1||std::abs(v.p.z)>1)throw std::runtime_error("Device dimensions exceeded");}if(size){std::vector<BYTE> bytes(size);read(file,bytes.data(),size);batch.texture=texture(bytes);}asset.batches.push_back(std::move(batch));}

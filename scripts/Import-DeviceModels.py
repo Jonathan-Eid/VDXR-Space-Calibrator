@@ -52,19 +52,34 @@ def glb(path):
     for root in doc['scenes'][doc.get('scene',0)]['nodes']:walk(root,np.eye(4))
     return batches
 
-def obj(path):
-    path=Path(path); points=[]; uv=[]; vertices=[]
+def obj(path, texture_path=None):
+    path=Path(path); points=[]; uv=[]; vertices=[]; material_files=[]
     for line in path.read_text().splitlines():
         fields=line.split()
         if not fields:continue
         if fields[0]=='v':points.append(list(map(float,fields[1:4])))
         elif fields[0]=='vt':uv.append(list(map(float,fields[1:3])))
+        elif fields[0]=='mtllib':material_files.extend(fields[1:])
         elif fields[0]=='f':
             for k in range(2,len(fields)-1):
                 for token in (fields[1],fields[k],fields[k+1]):
                     ids=token.split('/'); t=uv[int(ids[1])-1] if len(ids)>1 and ids[1] else [0,0]
                     vertices.append(points[int(ids[0])-1]+[1,1,1,1]+[t[0],1-t[1]])
-    texture=path.with_name('vr_tracker_vive_3_0_diff.png').read_bytes()
+    image=Path(texture_path) if texture_path else None
+    if image is None:
+        for material_file in material_files:
+            mtl=path.with_name(material_file)
+            if not mtl.exists():continue
+            for line in mtl.read_text(errors='replace').splitlines():
+                fields=line.strip().split(maxsplit=1)
+                if len(fields)==2 and fields[0]=='map_Kd':
+                    image=mtl.parent/fields[1].strip().strip('"');break
+            if image is not None:break
+    if image is None and path.name.lower()=='vr_tracker_vive_3_0.obj':
+        image=path.with_name('vr_tracker_vive_3_0_diff.png')
+    if image is None or not image.is_file():
+        raise ValueError('OBJ material texture not found; pass --texture or provide an MTL map_Kd file')
+    texture=image.read_bytes()
     return [(np.array(vertices,dtype='<f4'),texture)]
 
 def write(path,batches):
@@ -76,7 +91,7 @@ def write(path,batches):
             f.write(struct.pack('<II',len(vertices),len(texture))); f.write(vertices.tobytes()); f.write(texture)
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('source');p.add_argument('output');args=p.parse_args()
-    batches=glb(args.source) if args.source.endswith('.glb') else obj(args.source)
+    p=argparse.ArgumentParser();p.add_argument('source');p.add_argument('output');p.add_argument('--texture',help='Explicit texture path for OBJ sources; otherwise read map_Kd from the OBJ material file.');args=p.parse_args()
+    batches=glb(args.source) if args.source.endswith('.glb') else obj(args.source,args.texture)
     write(args.output,batches)
     print(f'{args.output}: {sum(len(v)//3 for v,t in batches)} triangles, {len(batches)} materials')
